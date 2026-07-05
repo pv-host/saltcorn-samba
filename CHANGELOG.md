@@ -4,6 +4,25 @@ All notable changes to `saltcorn-samba` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] – 2026-07-05
+
+### Fixed
+- **Installations-Fehler `plugin[key] is not a function` behoben.**
+  Der Top-Level-Manifest-Key `fieldviews` wurde aus `module.exports`
+  entfernt: Saltcorns Plugin-Loader erlaubt Fieldviews nur eingebettet in
+  ein `types`-Objekt, nicht global. Das Feature `samba_pdf` bleibt im
+  Paket enthalten, wird aber erst mit der geplanten DB-Verknüpfung als
+  echter typgebundener Fieldview reaktiviert. Der inline-PDF-Viewer im
+  `SambaFileManager` und die Route `GET /sambafile?disposition=inline`
+  funktionieren wie bisher.
+
+## [0.3.1] – 2026-07-05
+
+### Fixed
+- `smb-client.js` lädt `@marsaud/smb2` jetzt lazy – `npm test` läuft ohne
+  vorheriges `npm install`, weil die reinen Sanitizer-Helfer keinen SMB-
+  Import mehr auslösen.
+
 ## [0.3.0] – 2026-07-05
 
 ### Added

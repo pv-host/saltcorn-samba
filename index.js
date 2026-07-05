@@ -38,7 +38,8 @@ const {
 } = require("./smb-client");
 const treeView = require("./tree-view");
 const fileManagerView = require("./filemanager-view");
-const { samba_pdf } = require("./pdf-view");
+// pdf-view is intentionally NOT wired into the manifest (see note at bottom).
+// The file is kept in the package so the DB-linkage release can revive it.
 
 const PLUGIN_VERSION = pkg.version;
 const PLUGIN_NAME = "saltcorn-samba@" + PLUGIN_VERSION;
@@ -611,12 +612,17 @@ module.exports = {
   plugin_name: PLUGIN_NAME,
   configuration_workflow,
   viewtemplates: [wrapView(fileManagerView), wrapView(treeView)],
-  fieldviews: {
-    samba_pdf,
-  },
   routes,
   headers: [
     { css: `/plugins/public/${PLUGIN_NAME}/samba.css` },
   ],
   dependencies: [],
 };
+
+// Note: the `samba_pdf` fieldview shipped in v0.1–0.3.1 has been removed from
+// the top-level manifest because Saltcorn's plugin loader requires field
+// views to be attached to a type, not registered globally. The inline PDF /
+// image viewer is still available through the SambaFileManager view (click a
+// row) and via the `GET /sambafile?path=...&disposition=inline` route.
+// A properly-typed reintroduction of `samba_pdf` will follow together with
+// the DB-linkage feature in a later release.

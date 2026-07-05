@@ -9,7 +9,7 @@ Features:
 - ⬆️ **Upload / Neuer Ordner / Umbenennen / Löschen** — optional aktivierbar,
   Multi-File-Upload mit Drag-&-Drop, Toast-Feedback, Rollen-Gate.
 - 🌳 **`SambaTree`-View** — Lazy-loading Verzeichnisbaum, ideal zum Einbetten in Show-Views.
-- 📄 **`samba_pdf`-Fieldview** — String-Feld mit Datei-Pfad → PDF/Bild inline im Browser, plus Download- und externe-App-Buttons.
+- 📄 **Inline-PDF-/Bild-Anzeige** direkt im `SambaFileManager` (Klick auf eine Datei), plus Download- und externe-App-Buttons.
 - 🚀 **`smb://`-Links** — Öffnet Dateien und Ordner direkt in Nemo, Nautilus, Dolphin (Linux) oder Explorer (Windows).
 - 🔒 **Sicherheit** — Base-Path als „Chroot", strenge Path-Traversal-Prüfung (`..`, absolute Pfade, UNC, Drive-Letters, NUL-Bytes), CSRF-Schutz auf Schreib-Routen, Filename-Sanitizer, Extension-Blocklist, rollenbasierter Zugriff (getrennte Lese-/Schreib-Rollen).
 - 🐳 **Docker-freundlich** — direkt per SMB2-Protokoll, keine System-Binaries nötig.
@@ -168,7 +168,15 @@ Mode = `from_field`, Row field = `akte_dir` einbetten.
 Kompaktere Alternative – lazy-loading Baum, ideal in einer Sidebar oder
 neben Formularen. Gleiche Path-Modi wie beim File-Manager.
 
-### Fieldview `samba_pdf`
+### Fieldview `samba_pdf` (deaktiviert seit 0.3.2)
+
+> Der eigenständige Fieldview `samba_pdf` ist temporär nicht als
+> Fieldview registriert, weil er ohne DB-Verknüpfung an einen konkreten
+> Saltcorn-Typ gebunden werden müsste. Er kehrt in einer späteren
+> Version zusammen mit der DB-Integration zurück. Bis dahin liefert der
+> `SambaFileManager` selbst die Inline-Anzeige.
+
+_Historische Beschreibung:_
 
 Für ein String-Feld mit Datei-Pfad (relativ zum Base-Path). In der View-
 Konfiguration `Field view = samba_pdf` wählen. Rendert PDFs im `<iframe>`,

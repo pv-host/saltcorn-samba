@@ -7,7 +7,16 @@
  */
 
 const path = require("path");
-const SMB2 = require("@marsaud/smb2");
+
+// @marsaud/smb2 is loaded lazily so the pure sanitizer helpers exported by
+// this module can be required (e.g. from unit tests) without needing the
+// native SMB dependency installed.
+let _SMB2 = null;
+function getSMB2() {
+  if (_SMB2) return _SMB2;
+  _SMB2 = require("@marsaud/smb2");
+  return _SMB2;
+}
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -108,6 +117,7 @@ function buildClient(config) {
   if (/[\\/]/.test(share)) throw new Error("Samba: share must not contain slashes");
 
   const shareStr = `\\\\${server}${port ? ":" + port : ""}\\${share}`;
+  const SMB2 = getSMB2();
   const smb = new SMB2({
     share: shareStr,
     domain: domain || "WORKGROUP",
