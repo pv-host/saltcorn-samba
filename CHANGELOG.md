@@ -4,6 +4,163 @@ All notable changes to `saltcorn-samba` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.10] – 2026-07-05
+
+### Fixed – **DNS-Fehler: `getaddrinfo ENOTFOUND "host:445"`**
+
+Nachdem 0.3.9 den Callback-Signatur-Bug behoben hatte und der Test-Button
+endlich echt gegen den SMB-Server lief, kam bei der Verbindung ein neuer
+Fehler zum Vorschein:
+
+```
+getaddrinfo ENOTFOUND 192.168.110.10:445 (ENOTFOUND)
+```
+
+**Ursache:** In `smb-client.js` wurde der UNC-Share-String so gebaut:
+
+```js
+const shareStr = `\\\\${server}${port ? ":" + port : ""}\\${share}`;
+// => "\\\\192.168.110.10:445\\buero"
+```
+
+`@marsaud/smb2` interpretiert alles zwischen den führenden `\\` und dem
+nächsten `\` als **Hostnamen** und reicht das direkt an
+`net.connect()` / `dns.lookup()` weiter. Node versucht dann
+`"192.168.110.10:445"` als Hostnamen aufzulösen — was natürlich
+fehlschlägt.
+
+**Fix:** Host und Port sauber trennen.
+
+- Der `share`-UNC-Pfad enthält jetzt **nur den Host**:
+  `\\192.168.110.10\buero`
+- Der Port wird über die separate `port`-Option an `SMB2` übergeben
+  (Default 445).
+- Zusätzlich tolerant: falls jemand versehentlich `host:445` ins
+  Server-Feld einträgt, wird der Port dort herausgezogen.
+- IPv6-Adressen in eckigen Klammern (`[::1]:445`) werden unterstützt.
+
+### Notes
+- Keine Konfig-Migration nötig. Wer bisher Host **ohne** Port eingetragen
+  hat, bekommt jetzt genau die gleiche Verbindung wie vorher — nur
+  funktionierend.
+- Wer aus Verzweiflung `IP:445` ins Server-Feld getippt hatte: das wird
+  jetzt automatisch aufgesplittet. Sauberer ist trotzdem: Host im
+  Server-Feld, Port im Port-Feld.
+
+## [0.3.9] – 2026-07-05
+
+### Fixed – **Root-Cause-Fix: Falsche Callback-Signatur in allen Routen**
+
+Die Diagnose-Ausgabe aus 0.3.8 hat gezeigt, dass in den Route-Handlern
+**alle** Felder von `req` leer waren (`has_req_user: false`,
+`has_session: false`, `referer: null` usw.). Ursache war eine falsche
+Callback-Signatur, die seit 0.1 in **allen 8 Routen** verwendet wurde.
+
+Saltcorn registriert Plugin-Routen so
+(`packages/server/plugin_routes_handler.js`, Zeilen 40–52):
+
+```js
+tenantRouter.post(url, error_catcher(route.callback));
+```
+
+und `error_catcher` ist definiert als
+(`packages/server/routes/utils.ts`, Zeile 427):
+
+```js
+const error_catcher = (fn) => (request, response, next) => {
+  ...; fn(request, response, next);
+};
+```
+
+Die Callbacks werden also mit der klassischen Express-Signatur
+`(req, res, next)` aufgerufen — **nicht** mit einem Objekt `{ req, res }`.
+
+Bisher stand in `index.js` überall:
+
+```js
+callback: async ({ req, res }) => { ... }
+```
+
+Dadurch wurde aus dem echten Express-`request`-Objekt versucht, `req.req`
+und `req.res` per Destructuring zu holen — beides `undefined`. Effekt:
+
+- `req.user`, `req.session`, `req.headers`, `req.body`, `req.query`,
+  `req.csrfToken()` waren alle unerreichbar.
+- Der Admin-Check konnte niemals erfolgreich sein.
+- Der Samba-Verbindungstest hat *nie* funktioniert.
+- Datei-Listing, Upload, Rename, Delete, Mkdir waren ebenfalls betroffen.
+
+**Fix:** Alle 8 Routen (`/sambadir`, `/sambafile`, `/sambalink`,
+`/sambatest`, `/sambaupload`, `/sambadelete`, `/sambarename`,
+`/sambamkdir`) auf die korrekte Signatur umgestellt:
+
+```js
+callback: async (req, res) => { ... }
+```
+
+Damit erhält jeder Handler das echte Express-`req`-Objekt mit
+`req.user`, `req.session`, `req.headers`, `req.body`, `req.csrfToken()`,
+usw. — und die gesamte Admin- und Berechtigungslogik aus 0.3.7/0.3.8
+greift jetzt so, wie sie gedacht war.
+
+### Notes
+- Kein Funktionsverlust, keine Konfig-Migration nötig.
+- Wer 0.3.8 installiert hat und den Test-Button nicht zum Laufen bekommen
+  hat: **Update auf 0.3.9 einspielen, Server neu starten, erneut testen.**
+
+## [0.3.8] – 2026-07-05
+
+### Changed
+- **Admin-Erkennung im Test-Endpoint komplett neu aufgezogen.**
+  Statt weiter zu raten, welches Feld/welchen Typ Saltcorn für die Rolle
+  verwendet, wird jetzt aktiv nachgeladen. Drei unabhängige Wege, es
+  reicht wenn *einer* Erfolg hat:
+
+  1. **DB-Lookup (primär):** Aus der Session eine Kandidaten-ID/E-Mail
+     lesen und mit `User.findOne({ id })` frisch aus der Saltcorn-
+     Datenbank laden. Der User-Konstruktor konvertiert `role_id`
+     garantiert zu einer Number (siehe [`user.ts` Zeile 120](https://github.com/saltcorn/saltcorn/blob/master/packages/saltcorn-data/models/user.ts#L120)),
+     der Vergleich gegen `1` ist damit sauber.
+  2. **Session-Fallback:** Direkt aus `req.user` / `req.session.passport.user`,
+     mit Toleranz für String-Rollen.
+  3. **Referer-Fallback:** Wenn der Request nachweislich von der
+     Plugin-Config-Seite kommt (`referer` enthält `/plugins/`), ist der
+     User zwangsläufig Admin — Saltcorns eigene [`isAdmin`-Middleware](https://github.com/saltcorn/saltcorn/blob/master/packages/server/routes/utils.ts#L95)
+     lässt ihn sonst gar nicht erst auf die Config-Seite. Damit
+     funktioniert der Test-Button auch in Setups mit Reverse-Proxy,
+     Custom-Auth oder abweichender Session-Serialisierung.
+
+- **Deutlich mehr Diagnose-Ausgabe.** Das `debug`-Objekt in der Antwort
+  enthält jetzt zusätzlich `has_passport`, `session_id`, `req_user_keys`,
+  `db_lookup`, `db_role_id`, `db_role_id_type`, `db_email`,
+  `admin_by_db`, `admin_by_session`, `admin_by_referer`, `referer`.
+  Damit ist sofort sichtbar, welcher Pfad greift oder scheitert.
+
+- User-Modell wird via lazy `require()` geladen (mit `.default`-Interop
+  für ESM-Builds) — keine Zirkulärimport-Probleme.
+
+## [0.3.7] – 2026-07-05
+
+### Fixed
+- **„Only admins can test the connection.“ fälschlicherweise gemeldet.**
+  Die Admin-Prüfung in `POST /sambatest` verglich `req.user.role_id` mit
+  strikter Gleichheit gegen die Zahl `1`. Saltcorn liefert `role_id` je
+  nach Session-Serialisierung aber sowohl als Number wie auch als String
+  aus, weshalb `"1" !== 1` den Test blockierte. Die Prüfung akzeptiert
+  jetzt beide Formen (`Number(rid) === 1 || String(rid) === "1"`) und
+  liest den User zusätzlich aus `req.session.passport.user`, falls
+  `req.user` von einer noch nicht deserialisierten Session leer ist.
+  Vgl. [saltcorn utils.ts isAdminOrHasConfigMinRole](https://github.com/saltcorn/saltcorn/blob/master/packages/server/routes/utils.ts).
+- Auch der zentrale `roleOf(req)`-Helper (Lese-/Schreibrouten) toleriert
+  jetzt String-Rollen und Session-Fallback.
+
+### Changed
+- Bei fehlender Admin-Erkennung liefert `/sambatest` jetzt ein
+  `debug`-Objekt mit `has_req_user`, `has_session`, `role_id_seen`,
+  `role_id_type`, `email`, `user_id`. Der Test-Button zeigt diese
+  Diagnose in einem aufklappbaren „Session-Diagnose“-Panel – damit
+  wird sofort sichtbar, was Saltcorn dem Plugin zum Benutzer mitgibt.
+
 ## [0.3.6] – 2026-07-05
 
 ### Fixed

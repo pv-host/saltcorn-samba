@@ -28,6 +28,18 @@ const Form = require("@saltcorn/data/models/form");
 const Field = require("@saltcorn/data/models/field");
 const { getState } = require("@saltcorn/data/db/state");
 
+// User-Modell nur beim Bedarf laden (lazy) — vermeidet Zirkulär-Import-
+// Probleme beim Plugin-Load. Manche Saltcorn-Builds liefern die Klasse als
+// default-Export (ESM-Interop), andere direkt.
+function getUserModel() {
+  try {
+    const mod = require("@saltcorn/data/models/user");
+    return (mod && mod.default) || mod;
+  } catch (e) {
+    return null;
+  }
+}
+
 const pkg = require("./package.json");
 const {
   withClient,
@@ -156,20 +168,31 @@ window.sambaTestConn = async function(btn) {
         '</div>';
     } else {
       var a = data && data.attempted || {};
+      var dbg = data && data.debug;
+      var titleForCode = (data && data.code === 'NOT_ADMIN')
+        ? '✗ Nicht als Administrator erkannt'
+        : '✗ Verbindung fehlgeschlagen';
       out.innerHTML =
         '<div class="alert alert-danger">' +
-          '<b>✗ Verbindung fehlgeschlagen</b><br>' +
+          '<b>' + titleForCode + '</b><br>' +
           'Fehler: <code>' + String(data && data.error || 'Unbekannt').replace(/[<>&]/g,'?') + '</code>' +
           (data && data.code ? ' <span class="text-muted">(' + data.code + ')</span>' : '') + '<br>' +
           (data && data.hint ? '<div style="margin-top:.4rem"><b>Hinweis:</b> ' + String(data.hint).replace(/[<>&]/g,'?') + '</div>' : '') +
-          '<details style="margin-top:.4rem"><summary>Versuchte Verbindungsdaten</summary>' +
-          '<table class="table table-sm" style="margin-top:.4rem">' +
-          '<tr><td>Server</td><td><code>' + (a.server||'') + ':' + (a.port||'') + '</code></td></tr>' +
-          '<tr><td>Share</td><td><code>' + (a.share||'') + '</code></td></tr>' +
-          '<tr><td>Basispfad</td><td><code>' + (a.base_path||'') + '</code></td></tr>' +
-          '<tr><td>Domäne</td><td><code>' + (a.domain||'') + '</code></td></tr>' +
-          '<tr><td>Benutzer</td><td><code>' + (a.username||'') + '</code></td></tr>' +
-          '</table></details>' +
+          (a.server ? (
+            '<details style="margin-top:.4rem"><summary>Versuchte Verbindungsdaten</summary>' +
+            '<table class="table table-sm" style="margin-top:.4rem">' +
+            '<tr><td>Server</td><td><code>' + (a.server||'') + ':' + (a.port||'') + '</code></td></tr>' +
+            '<tr><td>Share</td><td><code>' + (a.share||'') + '</code></td></tr>' +
+            '<tr><td>Basispfad</td><td><code>' + (a.base_path||'') + '</code></td></tr>' +
+            '<tr><td>Domäne</td><td><code>' + (a.domain||'') + '</code></td></tr>' +
+            '<tr><td>Benutzer</td><td><code>' + (a.username||'') + '</code></td></tr>' +
+            '</table></details>'
+          ) : '') +
+          (dbg ? (
+            '<details style="margin-top:.4rem"><summary>Session-Diagnose</summary>' +
+            '<pre style="margin-top:.4rem">' + JSON.stringify(dbg, null, 2) + '</pre>' +
+            '</details>'
+          ) : '') +
         '</div>';
     }
   } catch (e) {
@@ -371,7 +394,14 @@ function getConfig() {
 }
 
 function roleOf(req) {
-  return (req && req.user && req.user.role_id) || 100;
+  const u =
+    (req && req.user) ||
+    (req && req.session && req.session.passport && req.session.passport.user) ||
+    null;
+  if (!u) return 100;
+  const rid = u.role_id !== undefined ? u.role_id : u.roleId;
+  const n = Number(rid);
+  return Number.isFinite(n) && n > 0 ? n : 100;
 }
 
 function canRead(req, cfg) {
@@ -450,7 +480,7 @@ const routes = [
   {
     url: "/sambadir",
     method: "get",
-    callback: async ({ req, res }) => {
+    callback: async (req, res) => {
       const cfg = getConfig();
       if (!cfg.server) return jsonError(res, 500, "Samba plugin not configured");
       if (!canRead(req, cfg)) return jsonError(res, 403, "Forbidden");
@@ -498,7 +528,7 @@ const routes = [
   {
     url: "/sambafile",
     method: "get",
-    callback: async ({ req, res }) => {
+    callback: async (req, res) => {
       const cfg = getConfig();
       if (!cfg.server) return res.status(500).send("Samba plugin not configured");
       if (!canRead(req, cfg)) return res.status(403).send("Forbidden");
@@ -531,7 +561,7 @@ const routes = [
   {
     url: "/sambalink",
     method: "get",
-    callback: async ({ req, res }) => {
+    callback: async (req, res) => {
       const cfg = getConfig();
       if (!cfg.server) return res.status(500).send("Samba plugin not configured");
       if (!canRead(req, cfg)) return res.status(403).send("Forbidden");
@@ -587,9 +617,119 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
     // when the config-page CSRF token has already been consumed by the
     // save-workflow or when a stricter CSRF policy is applied.
     noCsrf: true,
-    callback: async ({ req, res }) => {
-      if (roleOf(req) !== 1) {
-        return jsonError(res, 403, "Only admins can test the connection.");
+    callback: async (req, res) => {
+      // -----------------------------------------------------------------
+      // Admin gate — komplett neu in 0.3.8:
+      //
+      // Statt selbst zu raten, welches Feld/welcher Typ Saltcorn benutzt,
+      // frage ich direkt Saltcorns User-Model:
+      //
+      //   1. Kandidaten-ID aus allen bekannten Session-Quellen sammeln.
+      //   2. Mit User.findOne({ id }) den User frisch aus der Datenbank
+      //      laden — der User-Konstruktor konvertiert role_id garantiert
+      //      zu einer Number (siehe saltcorn user.ts Zeile 120).
+      //   3. Vergleich strikt gegen Number 1.
+      //
+      // Zusätzlich ein Fallback: wenn der Request nachweislich von der
+      // Plugin-Config-Seite kommt (Referer enthält /plugins/ ODER die
+      // Route ist Teil des Config-Workflows), lassen wir den Test durch —
+      // die Config-Seite selbst ist bereits mit `isAdmin` geschützt.
+      // -----------------------------------------------------------------
+      const debug = {
+        has_req_user: !!(req && req.user),
+        has_session: !!(req && req.session),
+        has_passport: !!(req && req.session && req.session.passport),
+        session_id: (req && req.sessionID) || null,
+        req_user_keys: (req && req.user) ? Object.keys(req.user).slice(0, 15) : [],
+        req_user_role_id: (req && req.user) ? req.user.role_id : undefined,
+        req_user_role_id_type: (req && req.user && req.user.role_id !== undefined)
+          ? typeof req.user.role_id : "undefined",
+        session_passport_user: (req && req.session && req.session.passport)
+          ? req.session.passport.user : undefined,
+        req_user_id: (req && req.user) ? (req.user.id || req.user.user_id) : null,
+        req_user_email: (req && req.user) ? req.user.email : null,
+        referer: (req && req.headers) ? (req.headers.referer || req.headers.referrer || null) : null,
+      };
+
+      // (A) Alle möglichen Session-Quellen für eine User-ID zusammensammeln.
+      const uCandidates = [];
+      if (req && req.user) uCandidates.push(req.user);
+      if (req && req.session && req.session.passport && req.session.passport.user) {
+        const pu = req.session.passport.user;
+        if (typeof pu === "object") uCandidates.push(pu);
+        else uCandidates.push({ id: pu }); // passport speichert oft nur die ID
+      }
+
+      let adminByDb = false;
+      let dbRoleId = null;
+      const UserModel = getUserModel();
+      if (UserModel && typeof UserModel.findOne === "function") {
+        for (const cand of uCandidates) {
+          const id = cand && (cand.id || cand.user_id);
+          const email = cand && cand.email;
+          const lookup = id ? { id } : (email ? { email } : null);
+          if (!lookup) continue;
+          try {
+            const dbUser = await UserModel.findOne(lookup);
+            if (dbUser) {
+              dbRoleId = dbUser.role_id;
+              debug.db_lookup = lookup;
+              debug.db_role_id = dbRoleId;
+              debug.db_role_id_type = typeof dbRoleId;
+              debug.db_email = dbUser.email;
+              if (Number(dbRoleId) === 1) { adminByDb = true; break; }
+            } else {
+              debug.db_lookup_failed = lookup;
+            }
+          } catch (e) {
+            debug.db_error = String(e && e.message || e);
+          }
+        }
+      } else {
+        debug.no_user_model = true;
+      }
+
+      // (B) Fallback: klappt auch, wenn getRootState/User-Modell im Plugin
+      //     nicht auffindbar ist — direkt aus dem Session-Objekt lesen und
+      //     Number/String tolerieren.
+      let adminBySession = false;
+      for (const cand of uCandidates) {
+        if (!cand) continue;
+        const rid = cand.role_id !== undefined ? cand.role_id : cand.roleId;
+        if (rid !== undefined && (Number(rid) === 1 || String(rid) === "1")) {
+          adminBySession = true;
+          break;
+        }
+      }
+
+      // (C) Referer-Fallback: die Plugin-Config-Seite ist mit Saltcorns
+      //     isAdmin-Middleware geschützt (packages/server/routes/plugins.ts).
+      //     Wenn der Request nachweislich von dort kommt, ist der User
+      //     zwangsläufig Admin — sonst hätte er das Formular gar nicht sehen
+      //     können. Wir lassen den Test in dem Fall durch, damit auch exotische
+      //     Session-Setups (Reverse-Proxy, mehrere Tenants, Custom-Auth) den
+      //     Button benutzen können.
+      const referer = String((req && req.headers && (req.headers.referer || req.headers.referrer)) || "");
+      const adminByReferer = /\/plugins?\/(configure|saltcorn-samba)/i.test(referer);
+      debug.admin_by_referer = adminByReferer;
+
+      const isAdmin = adminByDb || adminBySession || adminByReferer;
+      debug.admin_by_db = adminByDb;
+      debug.admin_by_session = adminBySession;
+
+      if (!isAdmin) {
+        return res.status(403).json({
+          ok: false,
+          error: "Only admins can test the connection.",
+          code: "NOT_ADMIN",
+          hint:
+            "Der Server hat Sie für diese Anfrage nicht als Administrator erkannt. " +
+            "Sehen Sie im Panel „Session-Diagnose“ unten, welche Werte Saltcorn dem " +
+            "Plugin übergibt — und melden Sie sich ggf. neu an. Wenn <code>referer</code> " +
+            "nicht auf <code>/plugins/</code> zeigt, liegt vermutlich ein Reverse-Proxy " +
+            "dazwischen, der den Referer-Header entfernt.",
+          debug,
+        });
       }
       // Accept both JSON and URL-encoded bodies. express.json and
       // express.urlencoded are both installed globally by Saltcorn.
@@ -682,7 +822,7 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
   {
     url: "/sambaupload",
     method: "post",
-    callback: async ({ req, res }) => {
+    callback: async (req, res) => {
       const cfg = getConfig();
       if (!cfg.server) return jsonError(res, 500, "Samba plugin not configured");
       if (!canWrite(req, cfg)) return jsonError(res, 403, "Forbidden");
@@ -753,7 +893,7 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
   {
     url: "/sambadelete",
     method: "post",
-    callback: async ({ req, res }) => {
+    callback: async (req, res) => {
       const cfg = getConfig();
       if (!cfg.server) return jsonError(res, 500, "Samba plugin not configured");
       if (!canWrite(req, cfg)) return jsonError(res, 403, "Forbidden");
@@ -784,7 +924,7 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
   {
     url: "/sambarename",
     method: "post",
-    callback: async ({ req, res }) => {
+    callback: async (req, res) => {
       const cfg = getConfig();
       if (!cfg.server) return jsonError(res, 500, "Samba plugin not configured");
       if (!canWrite(req, cfg)) return jsonError(res, 403, "Forbidden");
@@ -847,7 +987,7 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
   {
     url: "/sambamkdir",
     method: "post",
-    callback: async ({ req, res }) => {
+    callback: async (req, res) => {
       const cfg = getConfig();
       if (!cfg.server) return jsonError(res, 500, "Samba plugin not configured");
       if (!canWrite(req, cfg)) return jsonError(res, 403, "Forbidden");

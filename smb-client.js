@@ -116,13 +116,41 @@ function buildClient(config) {
   if (!share) throw new Error("Samba: share missing");
   if (/[\\/]/.test(share)) throw new Error("Samba: share must not contain slashes");
 
-  const shareStr = `\\\\${server}${port ? ":" + port : ""}\\${share}`;
+  // Host und Port sauber trennen. Der Server-String darf NICHT im share-UNC-
+  // Pfad landen, sonst versucht Node's DNS "host:port" als Hostnamen aufzulösen
+  // (getaddrinfo ENOTFOUND "1.2.3.4:445"). @marsaud/smb2 nimmt den Port über
+  // die separate `port`-Option entgegen; der share-String enthält nur den Host.
+  //
+  // Zusätzlich tolerant sein, falls jemand versehentlich "host:445" ins
+  // Server-Feld getippt hat — dann Port dort rausziehen.
+  let hostOnly = String(server).trim();
+  let portFromServer;
+  // IPv6-Adressen in eckigen Klammern zulassen: [::1]:445
+  const v6 = hostOnly.match(/^\[([^\]]+)\](?::(\d+))?$/);
+  if (v6) {
+    hostOnly = v6[1];
+    if (v6[2]) portFromServer = Number(v6[2]);
+  } else {
+    // Nur splitten, wenn genau EIN Doppelpunkt — sonst IPv6 ohne Klammern
+    const colonCount = (hostOnly.match(/:/g) || []).length;
+    if (colonCount === 1) {
+      const [h, p] = hostOnly.split(":");
+      if (h && /^\d+$/.test(p)) {
+        hostOnly = h;
+        portFromServer = Number(p);
+      }
+    }
+  }
+
+  const effectivePort = Number(port) || portFromServer || 445;
+  const shareStr = `\\\\${hostOnly}\\${share}`;
   const SMB2 = getSMB2();
   const smb = new SMB2({
     share: shareStr,
     domain: domain || "WORKGROUP",
     username: username || "guest",
     password: password || "",
+    port: effectivePort,
     autoCloseTimeout: 10000,
   });
 
