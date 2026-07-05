@@ -1,0 +1,52 @@
+{
+  "name": "saltcorn-samba",
+  "version": "0.2.0",
+  "description": "Saltcorn plugin: browse and display files from a Samba/CIFS share. File-manager view, directory tree, inline PDF viewer, external-app open (smb://).",
+  "main": "index.js",
+  "scripts": {
+    "test": "node test/sanitize.test.js",
+    "lint": "node --check index.js && node --check smb-client.js && node --check tree-view.js && node --check filemanager-view.js && node --check pdf-view.js && node --check public/samba-tree.js && node --check public/samba-filemanager.js",
+    "prepublishOnly": "npm run lint && npm test"
+  },
+  "keywords": [
+    "saltcorn",
+    "saltcorn-plugin",
+    "samba",
+    "smb",
+    "cifs",
+    "pdf",
+    "file-manager",
+    "files",
+    "no-code"
+  ],
+  "author": "Peter Vassen <ich@peter-vassen.de>",
+  "license": "MIT",
+  "homepage": "https://github.com/pv-host/saltcorn-samba#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pv-host/saltcorn-samba.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pv-host/saltcorn-samba/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@marsaud/smb2": "^0.18.0"
+  },
+  "files": [
+    "index.js",
+    "smb-client.js",
+    "tree-view.js",
+    "filemanager-view.js",
+    "pdf-view.js",
+    "public/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

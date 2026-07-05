@@ -1,0 +1,26 @@
+/* ---- shared tree styles ---- */
+.samba-tree-container { font-size: .95rem; }
+.samba-tree-list { padding-left: 0; margin: 0; }
+.samba-tree-item { padding: 2px 0; }
+.samba-tree-line:hover { background: rgba(0,0,0,.03); border-radius: 3px; }
+.samba-tree-label { user-select: none; }
+.samba-tree-toggle { color: #666; font-family: monospace; }
+.samba-tree-meta { flex-shrink: 0; }
+.samba-tree-external { text-decoration: none; }
+.samba-viewer { min-height: 0; }
+
+/* ---- file manager ---- */
+.samba-fm .card-header { background: transparent; }
+.samba-fm-toolbar { background: #fafafa; }
+.samba-fm-toolbar .breadcrumb { background: transparent; padding: 0; margin: 0; font-size: .9rem; }
+.samba-fm-table thead th {
+  position: sticky; top: 0; background: #fff; z-index: 1;
+  border-bottom: 2px solid #dee2e6;
+  font-weight: 600;
+}
+.samba-fm-table tbody tr:hover { background: rgba(13,110,253,.04); }
+.samba-fm-icon { text-align: center; }
+.samba-fm-name { text-decoration: none; color: inherit; }
+.samba-fm-name:hover { text-decoration: underline; color: #0d6efd; }
+.samba-fm-viewer:empty { display: none; }
+.samba-fm-viewer iframe { background: #fff; }
