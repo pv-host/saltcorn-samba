@@ -608,27 +608,48 @@ function wrapView(v) {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// IMPORTANT: how Saltcorn iterates the manifest
+// IMPORTANT: how Saltcorn reads the manifest
 // ---------------------------------------------------------------------------
-// When a plugin exports `configuration_workflow`, Saltcorn's state loader
-// treats EVERY other manifest key as a factory function and calls it with the
-// current plugin configuration — see
-// packages/saltcorn-data/db/state.ts `withCfg` (`plugin[key](cfg || {})`).
-// So each key below must be a function that returns the value, otherwise
-// Node throws `plugin[key] is not a function`. The only exceptions are the
-// bookkeeping keys `sc_plugin_api_version` and `configuration_workflow`
-// itself, which the loader accesses directly.
+// Two access patterns coexist in Saltcorn's plugin loader:
+//
+// 1. `withCfg(key)` in `saltcorn-data/db/state.ts` — when a plugin exports
+//    `configuration_workflow`, this helper calls `plugin[key](cfg)` and then
+//    iterates the return value. Any key it consults MUST therefore be a
+//    factory function that returns the real value.
+//    Keys consumed via `withCfg`: types, viewtemplates, functions,
+//    modelpatterns, fileviews, actions, eventTypes, fonts, icons,
+//    table_providers, authentication, exchange, copilot_skills,
+//    external_tables, headers, routes, capacitor_plugins.
+//
+// 2. Direct property access in `saltcorn-data/models/plugin.ts` — the
+//    loader reads a handful of keys straight off the module, WITHOUT going
+//    through `withCfg`. Those must be the raw value (not a function).
+//    Direct-access keys: dependencies (for..of loop), onLoad (called as fn),
+//    authentication (truthy check + later withCfg), user_config_form,
+//    plugin_name (string), layout / types / functions / viewtemplates
+//    (truthy checks in the plugin-store info card).
+//
+// The intersection is where confusion lives:
+// - `dependencies` is read *directly* as an iterable and MUST be an array.
+// - `viewtemplates`, `routes`, `headers` etc. are read via `withCfg` and
+//   MUST be functions when `configuration_workflow` is present.
+//
+// See:
+//   https://github.com/saltcorn/saltcorn/blob/master/packages/saltcorn-data/db/state.ts
+//   https://github.com/saltcorn/saltcorn/blob/master/packages/saltcorn-data/models/plugin.ts
 // ---------------------------------------------------------------------------
 
 module.exports = {
   sc_plugin_api_version: 1,
   configuration_workflow,
+  // The four keys below are consumed via `withCfg` → must be factory fns.
   viewtemplates: () => [wrapView(fileManagerView), wrapView(treeView)],
   routes: () => routes,
   headers: () => [
     { css: `/plugins/public/${PLUGIN_NAME}/samba.css` },
   ],
-  dependencies: () => [],
+  // `dependencies` is iterated directly (for..of) → must be a raw array.
+  dependencies: [],
 };
 
 // Note: the `samba_pdf` fieldview shipped in v0.1–0.3.1 has been removed from

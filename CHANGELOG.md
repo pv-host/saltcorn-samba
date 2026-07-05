@@ -4,6 +4,19 @@ All notable changes to `saltcorn-samba` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.4] – 2026-07-05
+
+### Fixed
+- **`function is not iterable` beim Installieren behoben.**
+  In v0.3.3 hatte ich überkompensiert: der Manifest-Key `dependencies`
+  wurde in eine Factory-Funktion umgewandelt — Saltcorn liest `dependencies`
+  jedoch NICHT über `withCfg`, sondern iteriert es direkt mit `for..of`
+  ([`saltcorn-data/models/plugin.ts` Zeile 638](https://github.com/saltcorn/saltcorn/blob/master/packages/saltcorn-data/models/plugin.ts)).
+  Deshalb muss `dependencies` ein statisches Array bleiben. Alle anderen
+  Keys (viewtemplates, routes, headers) werden weiterhin über `withCfg`
+  gelesen und bleiben Factory-Funktionen. Ein ausführlicher Header-Kommentar
+  über `module.exports` dokumentiert nun beide Zugriffsmuster.
+
 ## [0.3.3] – 2026-07-05
 
 ### Fixed
