@@ -160,6 +160,9 @@ window.sambaTestConn = async function(btn) {
       var rows = (data.entries||[]).map(function(e){
         return '<li>'+ (e.isDirectory?'📁 ':'📄 ') + String(e.name).replace(/[<>&]/g,'?') +'</li>';
       }).join('');
+      var noteHtml = data.note
+        ? '<div style="margin-top:.5rem;padding:.4rem .6rem;background:#fff3cd;border:1px solid #ffeeba;border-radius:.25rem"><b>Hinweis:</b> ' + String(data.note).replace(/[<>&]/g,'?') + '</div>'
+        : '';
       out.innerHTML =
         '<div class="alert alert-success">' +
           '<b>✓ Verbindung erfolgreich</b> (' + data.duration_ms + ' ms)<br>' +
@@ -167,6 +170,7 @@ window.sambaTestConn = async function(btn) {
           'Basispfad: <code>' + data.base_path + '</code>, Benutzer: <code>' + data.username + '</code><br>' +
           'Einträge gefunden: <b>' + data.entry_count + '</b>' + (data.truncated ? ' (erste 20 unten)' : '') +
           (rows ? '<ul style="margin:.5rem 0 0 1rem">' + rows + '</ul>' : '') +
+          noteHtml +
         '</div>';
     } else {
       var a = data && data.attempted || {};
@@ -180,6 +184,63 @@ window.sambaTestConn = async function(btn) {
           'Fehler: <code>' + String(data && data.error || 'Unbekannt').replace(/[<>&]/g,'?') + '</code>' +
           (data && data.code ? ' <span class="text-muted">(' + data.code + ')</span>' : '') + '<br>' +
           (data && data.hint ? '<div style="margin-top:.4rem"><b>Hinweis:</b> ' + String(data.hint).replace(/[<>&]/g,'?') + '</div>' : '') +
+          ((function(){
+            var d = data && data.diagnostics;
+            if (!d) return '';
+            var esc = function(s){ return String(s==null?'':s).replace(/[<>&]/g,function(c){return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c];}); };
+            var lc = String(d.missing_segment||'').toLowerCase();
+            var sibs = Array.isArray(d.siblings) ? d.siblings : [];
+            var similar = sibs.filter(function(s){
+              var n = String(s.name||'').toLowerCase();
+              if (!n || !lc) return false;
+              if (n === lc) return true;
+              if (n.indexOf(lc) !== -1 || lc.indexOf(n) !== -1) return true;
+              // simple Levenshtein-1 heuristic: same length ±1 and share prefix
+              return Math.abs(n.length - lc.length) <= 1 && n.substring(0, Math.min(3, n.length)) === lc.substring(0, Math.min(3, lc.length));
+            });
+            var box = '<div style="margin-top:.4rem;padding:.4rem .6rem;background:#f8d7da;border:1px solid #f5c2c7;border-radius:.25rem">';
+            box += '<b>Diagnose:</b> Der Server meldet, dass \u201e<code>' + esc(d.missing_segment) + '</code>\u201c im Ordner \u201e<code>' + esc(d.parent_path) + '</code>\u201c nicht existiert.';
+            // Working alternative spelling has the highest signal.
+            if (d.working_alternative) {
+              box += '<div style="margin-top:.3rem;padding:.3rem .5rem;background:#d1e7dd;border:1px solid #a3cfbb;border-radius:.25rem;color:#0f5132"><b>\u2192 Gefunden:</b> Der Ordner existiert unter dem Namen \u201e<code>' + esc(d.working_alternative) + '</code>\u201c. Bitte diesen exakt so als Basispfad eintragen.</div>';
+            }
+            if (!d.parent_listable) {
+              box += '<br><span class="text-muted">(Der übergeordnete Ordner konnte nicht aufgelistet werden';
+              if (d.parent_path === '(Share-Root)') {
+                box += ' \u2014 die direkte Auflistung des Share-Roots ist mit smb3-client auf Samba aktuell blockiert';
+              }
+              if (d.parent_error) {
+                box += '. Server-Antwort: <code>' + esc(d.parent_error) + '</code>';
+              }
+              box += '.)</span>';
+            } else if (sibs.length === 0) {
+              box += '<br>Der übergeordnete Ordner ist leer.';
+            } else {
+              if (similar.length) {
+                box += '<br><b>Ähnliche Einträge, die tatsächlich existieren:</b><ul style="margin:.3rem 0 .3rem 1rem">';
+                similar.slice(0, 10).forEach(function(s){ box += '<li>' + (s.isDirectory?'📁 ':'📄 ') + '<code>' + esc(s.name) + '</code></li>'; });
+                box += '</ul>';
+              }
+              box += '<details style="margin-top:.3rem"><summary>Alle Einträge im Ordner \u201e' + esc(d.parent_path) + '\u201c anzeigen (' + sibs.length + ')</summary><ul style="margin:.3rem 0 0 1rem">';
+              sibs.slice(0, 100).forEach(function(s){ box += '<li>' + (s.isDirectory?'📁 ':'📄 ') + '<code>' + esc(s.name) + '</code></li>'; });
+              if (sibs.length > 100) box += '<li><i>… (' + (sibs.length - 100) + ' weitere)</i></li>';
+              box += '</ul></details>';
+            }
+            // Spelling / case probes — always show, even without a
+            // working alternative, because seeing all four probes fail
+            // with the same error strongly suggests a permission issue
+            // rather than a spelling issue.
+            if (Array.isArray(d.spelling_probes) && d.spelling_probes.length) {
+              box += '<details style="margin-top:.3rem"><summary>Schreibvarianten-Test</summary><table class="table table-sm" style="margin-top:.3rem;font-size:.85em">';
+              box += '<thead><tr><th>Variante</th><th>Ergebnis</th></tr></thead><tbody>';
+              d.spelling_probes.forEach(function(p){
+                box += '<tr><td><code>' + esc(p.candidate) + '</code></td><td>' + (p.ok ? '✓ auflistbar' : '✗ <span class="text-muted">' + esc(String(p.error||'').split(/[\\r\\n]/)[0].slice(0,140)) + '</span>') + '</td></tr>';
+              });
+              box += '</tbody></table></details>';
+            }
+            box += '</div>';
+            return box;
+          })()) +
           (a.server ? (
             '<details style="margin-top:.4rem"><summary>Versuchte Verbindungsdaten</summary>' +
             '<table class="table table-sm" style="margin-top:.4rem">' +
@@ -301,11 +362,7 @@ const configuration_workflow = () =>
                 type: "String",
                 required: true,
                 attributes: {
-                  options: [
-                    { value: "if-offered", label: "if-offered (Standard)" },
-                    { value: "required",   label: "required (strikt)" },
-                    { value: "disabled",   label: "disabled (aus)" },
-                  ],
+                  options: ["if-offered", "required", "disabled"],
                 },
                 default: "if-offered",
               }),
@@ -321,11 +378,7 @@ const configuration_workflow = () =>
                 type: "String",
                 required: true,
                 attributes: {
-                  options: [
-                    { value: "if-offered", label: "if-offered (Standard)" },
-                    { value: "required",   label: "required (strikt)" },
-                    { value: "disabled",   label: "disabled (aus)" },
-                  ],
+                  options: ["if-offered", "required", "disabled"],
                 },
                 default: "if-offered",
               }),
@@ -795,10 +848,146 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
       try {
         const listing = await withClient(testCfg, async (client) => {
           // If base_path is set, list it — that also verifies traversal.
+          // For the share-root case we first try readdir; some Samba builds
+          // reject QUERY_DIRECTORY on the empty root name, so we fall back
+          // to stat("") — that already proves the whole handshake
+          // (TCP + Negotiate + Session + TREE_CONNECT + Auth) works, which
+          // is all the connection test actually promises.
           const rel = testCfg.base_path ? sanitizeRelativePath(testCfg.base_path) : "";
-          return await client.readdir(rel);
+          // When a base_path is set, verify it exists and is a directory
+          // BEFORE trying to enumerate it. This turns the opaque
+          // "CREATE failed: STATUS_OBJECT_NAME_NOT_FOUND" into a clear
+          // "Basispfad existiert nicht" hint the user can act on.
+          // We used to run a stat() first. That turned out to be flaky:
+          // smb3-client's stat() sends a CREATE with createOptions=0
+          // (no directory hint) which some Samba configurations reject
+          // for directories with strict ACLs. readdir() sends
+          // createOptions=1 (DIRECTORY_FILE) and is the right primitive
+          // for a base_path check anyway — we want to know the folder
+          // can actually be listed, not just opened.
+          try {
+            return await client.readdir(rel);
+          } catch (err) {
+            // Look at both the wrapper error and its underlying cause.
+            const causeMsg = String((err && err.cause && err.cause.message) || "");
+            const msg      = String((err && err.message) || err || "") + " " + causeMsg;
+            const isRootProbe = !rel;
+            const isRootEnumBug = /0xC0000033|OBJECT_NAME_INVALID|Share-Root/i.test(msg);
+            if (isRootProbe && isRootEnumBug) {
+              // Fall back: proof-of-life via stat on share root. This
+              // confirms TCP + Negotiate + Session + Auth + TREE_CONNECT
+              // without hitting the broken QUERY_DIRECTORY path.
+              try {
+                await client.stat("");
+                // Signal to the caller that the connection works, but
+                // the share root cannot be enumerated on this server.
+                const marker = [];
+                marker._rootNotEnumerable = true;
+                return marker;
+              } catch (statErr) {
+                // stat also failed — surface the original error.
+                throw err;
+              }
+            }
+            // A non-existent base_path (or one hidden from this user by
+            // Samba's "hide unreadable" behaviour) surfaces here. Try to
+            // gather actionable diagnostics: list the parent directory
+            // (if not the share root) and probe common alternative
+            // spellings of the missing segment so we can distinguish
+            // typo / case-mismatch / permission problems.
+            const isMissing = /OBJECT_NAME_NOT_FOUND|OBJECT_PATH_NOT_FOUND|ENOENT|STATUS_NO_SUCH_FILE|existiert.*nicht/i.test(msg);
+            if (rel && isMissing) {
+              const parts = rel.split("/").filter(Boolean);
+              const missing = parts[parts.length - 1];
+              const parent = parts.slice(0, -1).join("/");
+              const parentAbs = parent || "(Share-Root)";
+              let siblings = null;
+              let parent_error = null;
+              if (parent) {
+                try {
+                  const listing = await client.readdir(parent);
+                  siblings = Array.isArray(listing)
+                    ? listing.map((d) => ({
+                        name: d && (d.name || d),
+                        isDirectory: !!(d && (d.isDirectory === true || (typeof d.isDirectory === "function" && d.isDirectory()))),
+                      }))
+                    : null;
+                } catch (parentErr) {
+                  parent_error = String((parentErr && parentErr.message) || parentErr || "");
+                }
+              }
+              // Probe alternate spellings: original, upper, lower, capitalised.
+              // This lets us report "Ordner existiert unter anderem Namen" if
+              // Samba is running with case sensitive = yes / case-preserved.
+              const probes = [];
+              const seen = new Set();
+              const addProbe = (name) => {
+                if (!name || seen.has(name)) return;
+                seen.add(name);
+                probes.push(name);
+              };
+              addProbe(missing);
+              addProbe(missing.toUpperCase());
+              addProbe(missing.toLowerCase());
+              addProbe(missing.charAt(0).toUpperCase() + missing.slice(1).toLowerCase());
+              const probe_results = [];
+              for (const p of probes) {
+                const candidate = parent ? parent + "/" + p : p;
+                let ok = false;
+                let perr = null;
+                try {
+                  await client.readdir(candidate);
+                  ok = true;
+                } catch (pErr) {
+                  perr = String((pErr && pErr.message) || pErr || "");
+                }
+                probe_results.push({ candidate: p, ok, error: ok ? null : perr });
+              }
+              const workingAlt = probe_results.find(
+                (r) => r.ok && r.candidate !== missing
+              );
+              let hintText;
+              if (workingAlt) {
+                hintText =
+                  "Der Ordner heisst auf dem Server \u201e" +
+                  workingAlt.candidate +
+                  "\u201c (andere Gross-/Kleinschreibung). Bitte den " +
+                  "Basispfad exakt so eintragen \u2014 der Samba-Server ist " +
+                  "case-sensitive (\u201ecase sensitive = yes\u201c in smb.conf).";
+              } else {
+                hintText =
+                  "Der Basispfad \u201e" + rel + "\u201c ist auf dem " +
+                  "Server nicht auffindbar. M\u00f6gliche Ursachen: " +
+                  "(a) der Ordner existiert wirklich nicht (bitte mit " +
+                  "einem SMB-Client wie \u201esmbclient\u201c oder dem " +
+                  "Windows-Explorer gegenpr\u00fcfen); " +
+                  "(b) der angemeldete Benutzer \u201e" +
+                  (testCfg.username || "(anonymous)") +
+                  "\u201c hat kein Leserecht auf den Ordner (Samba antwortet " +
+                  "dann bei \u201ehide unreadable = yes\u201c mit " +
+                  "NAME_NOT_FOUND statt ACCESS_DENIED); " +
+                  "(c) der Ordner ist per \u201eveto files\u201c / " +
+                  "\u201ehide files\u201c auf dem Server ausgeblendet.";
+              }
+              const e = new Error(hintText);
+              e.cause = err;
+              e.code = "BASE_PATH_NOT_FOUND";
+              e.diagnostics = {
+                missing_segment: missing,
+                parent_path: parentAbs,
+                parent_listable: siblings !== null,
+                parent_error: parent_error,
+                siblings: siblings,
+                spelling_probes: probe_results,
+                working_alternative: workingAlt ? workingAlt.candidate : null,
+              };
+              throw e;
+            }
+            throw err;
+          }
         });
         const took = Date.now() - started;
+        const rootNotEnum = Array.isArray(listing) && listing._rootNotEnumerable === true;
         return res.json({
           ok: true,
           server: testCfg.server,
@@ -814,6 +1003,13 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
             isDirectory: !!(e && (e.isDirectory === true || (e.stats && e.stats.isDirectory && e.stats.isDirectory()))),
           })),
           truncated: Array.isArray(listing) && listing.length > 20,
+          note: rootNotEnum
+            ? "Verbindung + Anmeldung erfolgreich. Der Server erlaubt jedoch " +
+              "kein direktes Auflisten des Share-Roots (bekanntes Samba-" +
+              "Verhalten mit smb3-client). Bitte setzen Sie einen Basispfad " +
+              "in der Plugin-Config (z.\u202fB. einen Unterordner der " +
+              "Freigabe) — dann funktioniert der File-Manager vollständig."
+            : undefined,
         });
       } catch (err) {
         // Turn opaque SMB / socket errors into actionable hints.
@@ -856,6 +1052,7 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
           error: msg,
           code,
           hint,
+          diagnostics: (err && err.diagnostics) || undefined,
           attempted: {
             server: testCfg.server,
             share: testCfg.share,

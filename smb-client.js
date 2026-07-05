@@ -273,7 +273,61 @@ async function buildClient(config) {
      */
     async readdir(rel) {
       const full = resolvePath(rel);
-      const dirents = await client.readdir(full, { withFileTypes: true });
+      let dirents;
+      try {
+        dirents = await client.readdir(full, { withFileTypes: true });
+      } catch (err) {
+        // Some Samba builds (observed on 4.20+/4.23+) reject
+        // SMB2 QUERY_DIRECTORY on the *share root* with
+        // STATUS_OBJECT_NAME_INVALID (0xC0000033) because smb3-client
+        // asks for FileIdBothDirectoryInformation (class 37) on a
+        // handle opened with an empty filename. We cannot swap the
+        // information class from userland, and Samba refuses both
+        // "." (→ STATUS_OBJECT_NAME_NOT_FOUND) and "*" (→ CREATE with
+        // wildcard is protocol-illegal). The clean way out is:
+        // require the caller to configure a real base_path so every
+        // readdir happens inside a directory the server can enumerate.
+        const msg = String((err && err.message) || err || "");
+        const isRoot = !rel && !basePath;
+        const isRootEnumBug =
+          /0xC0000033|OBJECT_NAME_INVALID|QUERY_DIRECTORY/i.test(msg);
+        if (isRoot && isRootEnumBug) {
+          const e = new Error(
+            "Das Share-Root lässt sich auf diesem Samba-Server nicht " +
+            "direkt auflisten (" + (msg || "QUERY_DIRECTORY failed") + "). " +
+            "Bitte in der Plugin-Config einen Basispfad setzen (z.\u202fB. " +
+            "einen Unterordner der Freigabe wie „daten“ oder „projekte“) — " +
+            "dann funktionieren alle Directory-Listings innerhalb dieses " +
+            "Unterordners. Details siehe README, Abschnitt „Troubleshooting → " +
+            "QUERY_DIRECTORY auf Share-Root“."
+          );
+          e.cause = err;
+          throw e;
+        }
+        // A missing directory (either the base_path itself or a
+        // sub-directory the caller asked to list) surfaces as CREATE
+        // failing with STATUS_OBJECT_NAME_NOT_FOUND / OBJECT_PATH_NOT_FOUND
+        // (both reported by smb3-client with an ENOENT tail). The raw
+        // "CREATE failed: STATUS_OBJECT_NAME_NOT_FOUND (ENOENT)" is not
+        // actionable for end users, so rewrap it into a German hint that
+        // names the actual missing path.
+        const isMissing =
+          /OBJECT_NAME_NOT_FOUND|OBJECT_PATH_NOT_FOUND|ENOENT|STATUS_NO_SUCH_FILE/i.test(msg);
+        if (isMissing) {
+          const shown = full.replace(/^[^/]+\/?/, "") || "(Share-Root)";
+          const e = new Error(
+            "Der Pfad „" + shown + "“ existiert auf der Freigabe „" +
+            shareName + "“ nicht (oder ist für den angemeldeten Benutzer " +
+            "nicht sichtbar). Bitte Schreibweise, Groß-/Kleinschreibung " +
+            "und Zugriffsrechte prüfen. Ursprüngliche Server-Antwort: " +
+            (msg || "CREATE failed")
+          );
+          e.cause = err;
+          e.code = "ENOENT";
+          throw e;
+        }
+        throw err;
+      }
       // Parallel enrichment. Bounded to a reasonable concurrency to avoid
       // saturating the SMB session on huge directories.
       const CHUNK = 16;

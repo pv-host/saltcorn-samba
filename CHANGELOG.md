@@ -4,6 +4,184 @@ All notable changes to `saltcorn-samba` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.5] – 2026-07-05
+
+### Fixed – **Test-Verbindung-Button reagiert nicht mehr (v0.4.4-Regression)**
+
+In v0.4.4 enthielt der neu hinzugefügte Diagnose-IIFE-Block im Inline-
+Browser-Script eine Regex `.split(/[\r\n]/)`. Der HTML-Block ist ein
+**Template-Literal** in `index.js`; darin werden `\r` und `\n` zu
+**echten Steuerzeichen** aufgelöst. Das gerenderte `<script>` enthielt
+deshalb einen literalen Zeilenumbruch mitten in der Regex — der Browser
+konnte das Skript nicht mehr parsen, und `window.sambaTestConn` wurde
+nie definiert. Ein Klick auf „Verbindung jetzt testen“ zeigte deshalb
+keine Reaktion.
+
+**Fix:** Die Escape-Sequenz im Source auf `\\r\\n` verdoppelt, damit im
+gerenderten Skript wieder `\r\n` steht (also die Zeichenklasse, nicht
+die literalen Zeichen). Der Skript-Parse funktioniert wieder, die
+Test-Schaltfläche reagiert.
+
+Zusätzlich wurde die Rendering-Pipeline mit einem Node-`--check` auf
+dem *extrahierten* Browser-Skript verifiziert, damit dieser konkrete
+Fehlermodus in Zukunft schon lokal auffällt.
+
+## [0.4.4] – 2026-07-05
+
+### Fixed – **Falscher `NAME_NOT_FOUND` durch `stat()`-Vorprüfung**
+
+Die 0.4.3-Vorprüfung mit `client.stat(base_path)` schlug bei einigen
+Samba-Servern fehl, obwohl der Ordner existiert und per `readdir()`
+zugänglich ist. Ursache: `smb3-client` schickt in `stat()` ein CREATE
+ohne `DIRECTORY_FILE`-Flag (`createOptions: 0`); manche Samba-
+Konfigurationen (v.a. mit „access based enumeration“ oder speziellen
+POSIX-ACLs) beantworten das mit `NAME_NOT_FOUND`, während derselbe
+Ordner mit `readdir()` (`createOptions: 1 = DIRECTORY_FILE`) einwandfrei
+geht.
+
+**Fix:** Die Test-Route ruft direkt `readdir(base_path)` auf und fängt
+den Fehler ab. Das ist auch semantisch korrekter – wir wollen wissen,
+ob der Basispfad *aufgelistet* werden kann, nicht nur, ob er sich
+öffnen lässt.
+
+### Added – **Case-/Schreibvarianten-Test bei fehlender Basispfad-Erkennung**
+
+Schlägt der `readdir(base_path)`-Aufruf mit `NAME_NOT_FOUND` /
+`PATH_NOT_FOUND` fehl, probiert die Test-Route zusätzlich:
+
+- den Namen in UPPERCASE,
+- den Namen in lowercase,
+- den Namen als Capitalised.
+
+Gelingt eine dieser Varianten, wird der tatsächliche Name grün
+hervorgehoben („Gefunden: Der Ordner existiert unter dem Namen …“) und
+der User bekommt einen direkt umsetzbaren Fix. Schlagen alle Varianten
+mit demselben Fehler fehl, liegt es fast sicher an Zugriffsrechten
+(`hide unreadable = yes`) oder an `veto files` — die Meldung erklärt
+beide Fälle.
+
+Die Diagnose-Box im UI zeigt jetzt zusätzlich:
+
+- eine grüne Markierung mit dem richtigen Ordnernamen (falls gefunden),
+- eine ausklappbare Tabelle mit allen Schreibvarianten-Ergebnissen,
+- die Fehlermeldung beim Auflisten des übergeordneten Ordners (falls
+  das ebenfalls scheitert).
+
+## [0.4.3] – 2026-07-05
+
+### Fixed – **Unklare Meldung bei nicht-existierendem Basispfad**
+
+Wenn ein Basispfad angegeben wurde, der auf dem Server nicht existiert
+(oder für den angemeldeten Benutzer nicht sichtbar ist), meldete die
+Test-Route bisher nur die rohe Server-Antwort:
+
+```
+CREATE failed: STATUS_OBJECT_NAME_NOT_FOUND (ENOENT)
+CREATE failed: STATUS_OBJECT_PATH_NOT_FOUND (ENOENT)
+```
+
+Daraus konnte der Benutzer nicht erkennen, ob es sich um einen Tippfehler,
+um einen Klein-/Großschreibungs-Konflikt (Samba mit `case sensitive = yes`)
+oder um eine Berechtigung handelt.
+
+**Neu:**
+
+1. Die Test-Route prüft den Basispfad jetzt zuerst mit `stat()`, bevor sie
+   `readdir()` versucht. Fehlt der Ordner, wird eine deutsche Meldung
+   zurückgegeben, die den betroffenen Pfad, die Freigabe und typische
+   Ursachen (Schreibweise, Groß-/Kleinschreibung, Zugriffsrechte) nennt.
+2. Zusätzlich liefert die Route ein `diagnostics`-Objekt zurück, das
+   den fehlenden Segmentnamen, den übergeordneten Pfad und — sofern der
+   übergeordnete Ordner auflistbar ist — dessen tatsächliche Einträge
+   enthält. Das Test-UI hebt ähnlich geschriebene Nachbareinträge hervor,
+   damit Tippfehler oder Case-Mismatch sofort sichtbar werden.
+3. Der `smb-client.js`-`readdir()`-Wrapper mappt `OBJECT_NAME_NOT_FOUND`
+   und `OBJECT_PATH_NOT_FOUND` ebenfalls auf eine deutsche Meldung, damit
+   auch der File-Manager (außerhalb der Test-Route) verständlich über
+   fehlende Ordner informiert.
+
+**Kein Config-Migrationsschritt nötig.** Wer die neuen Diagnose-Boxen
+sehen will, muss lediglich `pv-host/saltcorn-samba@0.4.3` einspielen.
+
+## [0.4.2] – 2026-07-05
+
+### Fixed – **Dropdown-Felder zeigen `[object Object]` statt Optionen**
+
+Die neuen Felder `signing_mode` und `encryption_mode` wurden in der
+Saltcorn-UI mit `[object Object]` als einzige Auswahl gerendert.
+
+**Ursache:** In der genutzten Saltcorn-Version werden `attributes.options`
+als einfaches String-Array erwartet (`["a", "b", "c"]`), nicht als
+`{value, label}`-Objekt. Die Objekt-Form ist erst in neueren Builds
+vollständig unterstützt; sonst castet das UI die Objekte zu Strings.
+
+**Fix:** `options` auf String-Array umgestellt —
+`["if-offered", "required", "disabled"]`. Die Beschriftung bleibt in
+der `sublabel` erhalten (der Config-Wizard erklärt jeden Wert dort).
+
+### Fixed – **`STATUS_OBJECT_NAME_NOT_FOUND` durch fehlgeleiteten Root-Fallback**
+
+Der 0.4.1-Fallback `share/.` triggerte auf Samba einen anderen NT-Status:
+`STATUS_OBJECT_NAME_NOT_FOUND` (0xC0000034 / `ENOENT`), weil Samba `.` als
+literalen Dateinamen sucht statt als Current-Directory-Marker (das ist im
+POSIX-Layer, nicht im SMB2-Protokoll). Der zweite Fallback `share/*` ist
+protokoll-illegal (Wildcard im CREATE) und wird ebenfalls abgelehnt.
+
+**Neuer Ansatz:** Wir versuchen den Fallback erst gar nicht. Statt zu
+raten geben wir eine klare deutsche Fehlermeldung aus: **einen Basispfad
+setzen**. Das ist die einzige zuverlässige Lösung, solange `smb3-client`
+die `FileInformationClass` nicht konfigurierbar macht.
+
+Die Test-Route bleibt weiterhin nachsichtig: bei `OBJECT_NAME_INVALID`
+auf dem Root fällt sie auf `stat("")` zurück und meldet ein Erfolg mit
+Hinweis („Verbindung + Anmeldung erfolgreich, aber Share-Root nicht
+direkt auflistbar — bitte Basispfad setzen“). Der Hinweis wird als gelbe
+Box im Test-Ergebnis angezeigt.
+
+## [0.4.1] – 2026-07-05
+
+### Fixed – **`QUERY_DIRECTORY failed: 0xC0000033` auf Share-Root (Samba 4.20+/4.23+)**
+
+Symptom nach dem 0.4.0-Update: der Verbindungstest schlägt sofort fehl mit
+
+```
+Fehler: QUERY_DIRECTORY failed: 0xC0000033
+```
+
+(`STATUS_OBJECT_NAME_INVALID`). Betroffen sind Setups **ohne Basispfad** —
+sobald ein Basispfad gesetzt ist, greift der Fehler nicht.
+
+**Ursache:** `smb3-client` öffnet den Share-Root im SMB2-CREATE mit einem
+leeren Filename (`""`). Moderne Samba-Versionen (bestehen jedenfalls
+**4.20+**, bestätigt auf **4.23.9**) akzeptieren das für CREATE, weisen
+aber das anschließende `QUERY_DIRECTORY` mit `FileIdBothDirectoryInformation`
+auf dem leeren Namen als `OBJECT_NAME_INVALID` zurück. Vergleichbare
+Probleme sind aus anderen Java-/Go-SMB-Client-Bibliotheken bekannt (z. B.
+[smbj#80](https://github.com/hierynomus/smbj/issues/80)).
+
+**Lösung:**
+
+1. `smb-client.js#readdir("")` bekommt einen Fallback: wenn der
+   Server auf dem leeren Root mit `OBJECT_NAME_INVALID` antwortet, wird
+   die Auflistung noch einmal mit `share/.` (aktuelles Verzeichnis) und,
+   falls das ebenfalls scheitert, mit `share/*` (Wildcard) probiert.
+   Erst wenn auch das nicht klappt, wird eine deutsche Fehlermeldung mit
+   Handlungsanweisung ausgelöst.
+2. Die `/sambatest`-Route greift auf `client.stat("")` zurück, wenn das
+   Root-`readdir` mit `OBJECT_NAME_INVALID` scheitert. `stat("")`
+   verwendet CREATE ohne `DIRECTORY_FILE`-Flag und ohne QUERY_DIRECTORY —
+   das beweist Netzwerk + Negotiate + Session-Setup + TREE_CONNECT + Auth
+   ohne die problematische Query. Der Test liefert dann `entry_count: 0`
+   und den Hinweis, dass ein Basispfad gesetzt werden sollte, sofern der
+   Server das Root-Listing nicht anders bereitstellt.
+
+### Empfehlung
+
+Wenn Ihr Samba-Server das Share-Root-`QUERY_DIRECTORY` weiterhin ablehnt,
+setzen Sie in der Plugin-Config einen **Basispfad** (z. B. `daten` oder
+`projekte`) — dann sind alle Directory-Listings innerhalb dieses
+Unterverzeichnisses, was durchgängig funktioniert.
+
 ## [0.4.0] – 2026-07-05
 
 ### ⚠️ BREAKING CHANGES
