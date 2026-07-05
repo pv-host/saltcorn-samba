@@ -4,6 +4,20 @@ All notable changes to `saltcorn-samba` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.3] – 2026-07-05
+
+### Fixed
+- **`plugin[key] is not a function` beim Installieren behoben.**
+  Saltcorns Plugin-Loader ruft — sobald ein Plugin `configuration_workflow`
+  exportiert — *jeden* weiteren Manifest-Key als Funktion mit der aktuellen
+  Konfiguration als Argument auf (siehe
+  [saltcorn-data/db/state.ts, Fn `withCfg`](https://github.com/saltcorn/saltcorn/blob/master/packages/saltcorn-data/db/state.ts)).
+  In v0.3.2 waren `viewtemplates`, `routes`, `headers` und `dependencies`
+  jedoch statische Arrays — der Aufruf `plugin.viewtemplates(cfg)` warf
+  daher den Fehler. Alle Keys sind jetzt Factory-Funktionen, die den Wert
+  zurückgeben. `plugin_name` als Top-Level-Key wurde entfernt (aus
+  demselben Grund unaufrufbar).
+
 ## [0.3.2] – 2026-07-05
 
 ### Fixed

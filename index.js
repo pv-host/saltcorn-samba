@@ -607,16 +607,28 @@ function wrapView(v) {
 // Manifest
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// IMPORTANT: how Saltcorn iterates the manifest
+// ---------------------------------------------------------------------------
+// When a plugin exports `configuration_workflow`, Saltcorn's state loader
+// treats EVERY other manifest key as a factory function and calls it with the
+// current plugin configuration — see
+// packages/saltcorn-data/db/state.ts `withCfg` (`plugin[key](cfg || {})`).
+// So each key below must be a function that returns the value, otherwise
+// Node throws `plugin[key] is not a function`. The only exceptions are the
+// bookkeeping keys `sc_plugin_api_version` and `configuration_workflow`
+// itself, which the loader accesses directly.
+// ---------------------------------------------------------------------------
+
 module.exports = {
   sc_plugin_api_version: 1,
-  plugin_name: PLUGIN_NAME,
   configuration_workflow,
-  viewtemplates: [wrapView(fileManagerView), wrapView(treeView)],
-  routes,
-  headers: [
+  viewtemplates: () => [wrapView(fileManagerView), wrapView(treeView)],
+  routes: () => routes,
+  headers: () => [
     { css: `/plugins/public/${PLUGIN_NAME}/samba.css` },
   ],
-  dependencies: [],
+  dependencies: () => [],
 };
 
 // Note: the `samba_pdf` fieldview shipped in v0.1–0.3.1 has been removed from
