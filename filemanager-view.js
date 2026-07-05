@@ -136,7 +136,7 @@ function computeStartPath(configuration, row) {
 // Shell renderer
 // ---------------------------------------------------------------------------
 
-function renderShell(startPath, configuration, pluginVersion) {
+function renderShell(startPath, configuration, pluginVersion, csrfToken) {
   const id = "samba-fm-" + Math.random().toString(36).slice(2, 10);
   const opts = {
     startPath,
@@ -146,6 +146,7 @@ function renderShell(startPath, configuration, pluginVersion) {
     exposeSmbLink: configuration.expose_smb_link !== false,
     pageSize: Number(configuration.page_size) || 0,
     title: configuration.title || "Samba files",
+    csrfToken: csrfToken || "",
   };
 
   return (
@@ -183,8 +184,21 @@ function renderShell(startPath, configuration, pluginVersion) {
 // View functions
 // ---------------------------------------------------------------------------
 
+function extractCsrf(extra) {
+  const req = extra && extra.req;
+  if (req && typeof req.csrfToken === "function") {
+    try {
+      return req.csrfToken();
+    } catch (_) {
+      return "";
+    }
+  }
+  return "";
+}
+
 async function run(table_id, viewname, configuration, state, extra) {
-  const pluginVersion = configuration.__pluginVersion || "0.2.0";
+  const pluginVersion = configuration.__pluginVersion || "0.3.0";
+  const csrf = extractCsrf(extra);
   let row = extra && extra.row;
   if (!row && configuration.mode === "from_field" && table_id) {
     const table = await Table.findOne({ id: table_id });
@@ -202,11 +216,12 @@ async function run(table_id, viewname, configuration, state, extra) {
   } catch (e) {
     return div({ class: "alert alert-danger" }, "Samba file manager: " + e.message);
   }
-  return renderShell(startPath, configuration, pluginVersion);
+  return renderShell(startPath, configuration, pluginVersion, csrf);
 }
 
 async function runMany(table_id, viewname, configuration, state, extra) {
-  const pluginVersion = configuration.__pluginVersion || "0.2.0";
+  const pluginVersion = configuration.__pluginVersion || "0.3.0";
+  const csrf = extractCsrf(extra);
   const rows = (extra && extra.rows) || [];
   return rows.map((row) => {
     let startPath = "";
@@ -216,7 +231,7 @@ async function runMany(table_id, viewname, configuration, state, extra) {
       startPath = "";
     }
     return {
-      html: renderShell(startPath, configuration, pluginVersion),
+      html: renderShell(startPath, configuration, pluginVersion, csrf),
       row,
     };
   });

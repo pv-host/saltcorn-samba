@@ -6,10 +6,12 @@ direkt aus dem Browser — ohne Mount, ohne `smbclient` im Container.
 Features:
 
 - 📂 **`SambaFileManager`-View** — Datei-Manager wie *Einstellungen → Dateien* in Saltcorn: Tabelle mit Symbol, Name, MIME-Typ, Größe, Änderungsdatum und Aktionen. Breadcrumb-Navigation, Up-/Home-/Refresh-Button, Sortierung per Spaltenklick, Pagination, Anzeige versteckter Dateien optional.
+- ⬆️ **Upload / Neuer Ordner / Umbenennen / Löschen** — optional aktivierbar,
+  Multi-File-Upload mit Drag-&-Drop, Toast-Feedback, Rollen-Gate.
 - 🌳 **`SambaTree`-View** — Lazy-loading Verzeichnisbaum, ideal zum Einbetten in Show-Views.
 - 📄 **`samba_pdf`-Fieldview** — String-Feld mit Datei-Pfad → PDF/Bild inline im Browser, plus Download- und externe-App-Buttons.
 - 🚀 **`smb://`-Links** — Öffnet Dateien und Ordner direkt in Nemo, Nautilus, Dolphin (Linux) oder Explorer (Windows).
-- 🔒 **Sicherheit** — Base-Path als „Chroot", strenge Path-Traversal-Prüfung (`..`, absolute Pfade, UNC, Drive-Letters, NUL-Bytes), rollenbasierter Zugriff.
+- 🔒 **Sicherheit** — Base-Path als „Chroot", strenge Path-Traversal-Prüfung (`..`, absolute Pfade, UNC, Drive-Letters, NUL-Bytes), CSRF-Schutz auf Schreib-Routen, Filename-Sanitizer, Extension-Blocklist, rollenbasierter Zugriff (getrennte Lese-/Schreib-Rollen).
 - 🐳 **Docker-freundlich** — direkt per SMB2-Protokoll, keine System-Binaries nötig.
 
 ---
@@ -46,7 +48,7 @@ Sobald das Plugin auf npm veröffentlicht ist:
 2. Name: `saltcorn-samba`
 3. Source: **npm**
 4. Location: `saltcorn-samba`
-5. Version leer lassen (aktuellste) oder z. B. `0.2.0`
+5. Version leer lassen (aktuellste) oder z. B. `0.3.0`
 
 ### 2. Direkt aus GitHub
 
@@ -94,23 +96,40 @@ docker exec -it <saltcorn-container> \
 ## Konfiguration
 
 Nach der Installation unter *Einstellungen → Plugins → saltcorn-samba →
-Configure* ausfüllen:
+Configure* ausfüllen. Die Konfiguration ist zweistufig:
+
+### Schritt 1 — *Samba server*
 
 | Feld | Beispiel | Beschreibung |
 |---|---|---|
 | Server | `192.168.1.10` | Hostname oder IP des Samba-Servers |
 | Share name | `documents` | Name des Shares (ohne Slashes) |
 | Domain / Workgroup | `WORKGROUP` | optional |
-| Username | `saltcorn-reader` | SMB-Benutzer |
+| Username | `saltcorn-user` | SMB-Benutzer |
 | Password | *(secret)* | wird im Saltcorn-Konfigstore gespeichert |
 | Base path | `projects` | *optional* — beschränkt jeden Zugriff auf dieses Unterverzeichnis |
 | Port | `445` | Standard-SMB2-Port |
-| Minimum role to read files | `80` | 1=Admin, 40=Staff, 80=User, 100=public |
 | SMB host visible to clients | `fileserver.lan` | *optional* — Host, der in `smb://`-Links auftaucht (nützlich in Docker) |
 
-**Empfehlung:** legen Sie auf dem Samba-Server einen read-only Nutzer an,
-der ausschließlich auf die relevanten Freigaben Zugriff hat. Zusätzlich mit
-*Base path* den Bereich absichern.
+### Schritt 2 — *Access & permissions*
+
+| Feld | Default | Beschreibung |
+|---|---|---|
+| Minimum role to read files | `80` | 1=Admin, 40=Staff, 80=User, 100=public |
+| Minimum role to write files | `40` | `100` deaktiviert Schreibaktionen komplett |
+| Allow upload | *aus* | schaltet Upload-Button + `POST /sambaupload` frei |
+| Allow delete | *aus* | schaltet Löschen frei (`POST /sambadelete`) |
+| Allow rename | *aus* | schaltet Umbenennen frei (`POST /sambarename`) |
+| Allow mkdir | *aus* | schaltet *Neuer Ordner* frei (`POST /sambamkdir`) |
+| Max. Upload-Größe (MB) | `50` | Limit pro Datei |
+| Denied file extensions | `exe,bat,cmd,com,msi,scr,vbs,js,jse,wsf,wsh,ps1,ps1xml,psm1,sh,bash,zsh` | kommagetrennte Blocklist |
+
+**Empfehlung:**
+
+- Nur die Features aktivieren, die wirklich gebraucht werden.
+- Auf dem Samba-Server einen separaten Nutzer mit passenden Rechten anlegen
+  (read-only wenn nur gelesen werden soll).
+- Zusätzlich mit *Base path* den Zugriff auf ein Unterverzeichnis begrenzen.
 
 ---
 
@@ -171,15 +190,31 @@ Zwischenseite mit sichtbarem Klick-Link.
 
 ## Routen (öffentliche HTTP-API des Plugins)
 
+### Lesen (GET, Rolle ≥ `min_role_read`)
+
 | Methode + URL | Parameter | Zweck |
 |---|---|---|
-| `GET /sambadir`  | `path`, `show_hidden` | JSON-Verzeichnisliste |
+| `GET /sambadir`  | `path`, `show_hidden` | JSON-Verzeichnisliste + `perms` |
 | `GET /sambafile` | `path`, `disposition=inline\|attachment` | Datei-Stream |
 | `GET /sambalink` | `path` | HTML-Seite mit `smb://`-Anker |
 
-Alle Routen prüfen die Rolle des angemeldeten Nutzers gegen
-`min_role_read` aus der Plugin-Konfiguration und validieren jeden Pfad
-gegen Path-Traversal.
+### Schreiben (POST, Rolle ≥ `min_role_write`, CSRF-Token erforderlich)
+
+| Methode + URL | Body / Form | Zweck |
+|---|---|---|
+| `POST /sambaupload` | `multipart/form-data`: `dir`, `file` (n-fach), `overwrite`, `_csrf` | Dateien hochladen |
+| `POST /sambadelete` | JSON: `path`, `_csrf` | Datei/Ordner (rekursiv) löschen |
+| `POST /sambarename` | JSON: `path`, `new_name`, `_csrf` | Umbenennen |
+| `POST /sambamkdir`  | JSON: `dir`, `name`, `_csrf` | Neuen Ordner anlegen |
+
+Das CSRF-Token wird von Saltcorn per `req.csrfToken()` erzeugt. Der Client
+übergibt es entweder als Feld `_csrf` im Body oder als HTTP-Header
+`X-CSRF-Token` (bzw. `CSRF-Token`). Wer CSRF für diese Routen abschalten
+möchte, kann das in den Saltcorn-*Users & Security*-Einstellungen tun.
+
+Alle Routen prüfen die Rolle, validieren jeden Pfad gegen Path-Traversal
+und lehnen Filenames ab, die Slashes, Steuerzeichen, `<>:"|?*`,
+führende/abschließende Punkte oder Windows-Reserved-Names enthalten.
 
 ---
 
@@ -188,13 +223,21 @@ gegen Path-Traversal.
 - **Base-Path als Chroot** — sanitizer verhindert das Verlassen.
 - **Path-Prüfung** — `..`, absolute Pfade (`/foo`), UNC (`//srv/share`,
   `\\srv\share`), Drive-Letters (`C:`, `d:\`), NUL-Bytes werden abgelehnt.
-- **Read-only SMB-Nutzer** empfohlen.
-- **Rollen-Gate** — `min_role_read` per Konfiguration.
+- **Filename-Sanitizer** für Upload / Rename / Mkdir — lehnt Slashes,
+  Steuerzeichen, `<>:"|?*`, führende/abschließende Punkte, Leerzeichen und
+  Windows-Reserved-Names (`CON`, `PRN`, `AUX`, `NUL`, `COM1–9`, `LPT1–9`)
+  ab.
+- **CSRF-Schutz** auf allen POST-Routen (Body `_csrf` oder Header
+  `X-CSRF-Token`).
+- **Extension-Blocklist** für Uploads (Default blockt exe/bat/cmd/vbs/js
+  u.ä.), konfigurierbar.
+- **Getrennte Rollen-Gates** — `min_role_read` und `min_role_write`, plus
+  Feature-Toggles pro Schreib-Aktion.
 - **Kein öffentliches Caching** — Files werden mit `Cache-Control: no-store`
   ausgeliefert.
 - **HTML-Escape** in allen serverseitig gerenderten Antworten.
 
-Unit-Tests zum Sanitizer laufen in CI (`npm test`).
+Unit-Tests zum Path- und Filename-Sanitizer laufen in CI (`npm test`).
 
 ---
 
@@ -223,7 +266,7 @@ lädt neu.
 npm login
 npm run lint && npm test       # läuft auch als prepublishOnly
 npm publish                    # --access public wird durch publishConfig gesetzt
-git tag v0.2.0 && git push --tags
+git tag v0.3.0 && git push --tags
 ```
 
 ### Als GitHub-Plugin nutzbar machen
@@ -250,13 +293,13 @@ Ab dann taucht das Plugin im Plugins-Store jeder Saltcorn-Instanz auf.
 
 ## Bekannte Grenzen
 
-- **Read-only** — kein Upload / Löschen / Umbenennen (kommt in v0.3).
-- Dateien werden komplett gepuffert (`readFile`). Für >100 MB besser
-  einen CIFS-Mount + Saltcorn-`File`-Typ nutzen.
+- Dateien werden komplett gepuffert (`readFile` / `writeFile`). Für
+  Dateien > 100 MB besser einen CIFS-Mount + Saltcorn-`File`-Typ nutzen.
 - **Nur SMB2/3** — SMBv1 wird nicht unterstützt.
-- **Ein SMB-User** entscheidet über Sichtbarkeit — für rollen­spezifische
-  Sichtbarkeit auf Share-Ebene arbeiten oder mehrere Plugin-Instanzen
-  verwenden.
+- **Ein SMB-User** entscheidet über Sichtbarkeit und Schreibrechte auf
+  dem Share — für rollen­spezifische Sichtbarkeit auf Share-Ebene
+  arbeiten oder mehrere Plugin-Instanzen verwenden.
+- **Keine DB-Verknüpfung** von SMB-Dateien (geplant für spätere Version).
 
 ---
 

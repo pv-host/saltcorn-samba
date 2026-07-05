@@ -14,6 +14,41 @@ const SMB2 = require("@marsaud/smb2");
 // ---------------------------------------------------------------------------
 
 /**
+ * Validate a single file/directory name component (no path separators!).
+ * Rejects empty, dot-only, path separators, control chars, and reserved
+ * Windows device names. Returns the trimmed name on success, throws on
+ * invalid input.
+ */
+function sanitizeFilename(name) {
+  if (name === undefined || name === null) throw new Error("Filename required");
+  if (typeof name !== "string") throw new Error("Filename must be a string");
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error("Filename must not be empty");
+  // reject leading/trailing whitespace on non-empty names (Windows problem)
+  if (name !== trimmed)
+    throw new Error("Filename must not start or end with whitespace");
+  if (trimmed.length > 255) throw new Error("Filename too long");
+  if (trimmed === "." || trimmed === "..")
+    throw new Error("Filename must not be '.' or '..'");
+  if (/[\\/]/.test(trimmed)) throw new Error("Filename must not contain slashes");
+  if (/[\x00-\x1f]/.test(trimmed)) throw new Error("Filename must not contain control characters");
+  // Reject characters SMB / Windows disallow in filenames
+  if (/[<>:"|?*]/.test(trimmed))
+    throw new Error('Filename must not contain any of: < > : " | ? *');
+  if (trimmed.endsWith(".") || trimmed.endsWith(" "))
+    throw new Error("Filename must not end with a dot or space");
+  // Windows reserved device names (case-insensitive, with or without extension)
+  const base = trimmed.split(".")[0].toUpperCase();
+  const RESERVED = new Set([
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+  ]);
+  if (RESERVED.has(base)) throw new Error("Filename uses a reserved device name");
+  return trimmed;
+}
+
+/**
  * Reject path traversal, absolute paths, drive letters, NUL bytes, and other
  * suspicious content. Returns a normalised POSIX-style relative path (no
  * leading/trailing separators). Throws on invalid input.
@@ -125,6 +160,40 @@ function buildClient(config) {
         );
       });
     },
+    writeFile(rel, data) {
+      return new Promise((res, rej) => {
+        smb.writeFile(resolve(rel), data, (err) =>
+          err ? rej(err) : res()
+        );
+      });
+    },
+    exists(rel) {
+      return new Promise((res) => {
+        smb.exists(resolve(rel), (err, ok) => res(err ? false : !!ok));
+      });
+    },
+    unlink(rel) {
+      return new Promise((res, rej) => {
+        smb.unlink(resolve(rel), (err) => (err ? rej(err) : res()));
+      });
+    },
+    rmdir(rel) {
+      return new Promise((res, rej) => {
+        smb.rmdir(resolve(rel), (err) => (err ? rej(err) : res()));
+      });
+    },
+    mkdir(rel) {
+      return new Promise((res, rej) => {
+        smb.mkdir(resolve(rel), (err) => (err ? rej(err) : res()));
+      });
+    },
+    rename(oldRel, newRel) {
+      return new Promise((res, rej) => {
+        smb.rename(resolve(oldRel), resolve(newRel), (err) =>
+          err ? rej(err) : res()
+        );
+      });
+    },
     createReadStream(rel) {
       return new Promise((res, rej) => {
         smb.createReadStream(resolve(rel), (err, stream) =>
@@ -203,6 +272,7 @@ module.exports = {
   buildClient,
   withClient,
   sanitizeRelativePath,
+  sanitizeFilename,
   toSmbPath,
   toSmbUrl,
   mimeFromName,

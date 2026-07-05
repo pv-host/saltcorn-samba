@@ -1,10 +1,6 @@
 /**
- * Minimal sanity tests for the path sanitizer. Runs without any test
- * framework – just `node test/sanitize.test.js` (exit code 0 = success).
- *
- * These are the security-critical assertions of the plugin: every path
- * coming from the browser is fed through `sanitizeRelativePath` before it
- * ever touches the SMB client.
+ * Minimal sanity tests for the path & filename sanitizers.
+ * Run with `node test/sanitize.test.js` (exit code 0 = success).
  */
 
 "use strict";
@@ -12,6 +8,7 @@
 const assert = require("assert");
 const {
   sanitizeRelativePath,
+  sanitizeFilename,
   toSmbPath,
   toSmbUrl,
 } = require("../smb-client");
@@ -27,7 +24,7 @@ function t(name, fn) {
   }
 }
 
-// --- accepted inputs --------------------------------------------------------
+// ==== sanitizeRelativePath ==================================================
 t("empty string → empty", () => assert.strictEqual(sanitizeRelativePath(""), ""));
 t("undefined → empty", () => assert.strictEqual(sanitizeRelativePath(undefined), ""));
 t("single slash → empty", () => assert.strictEqual(sanitizeRelativePath("/"), ""));
@@ -45,8 +42,7 @@ t("unicode allowed", () =>
 t("spaces allowed", () =>
   assert.strictEqual(sanitizeRelativePath("Kunde 42/Akte 2026.pdf"), "Kunde 42/Akte 2026.pdf"));
 
-// --- rejected inputs --------------------------------------------------------
-const rejects = [
+const relRejects = [
   ["..", "traversal"],
   ["../etc/passwd", "traversal"],
   ["foo/../../etc", "traversal"],
@@ -59,21 +55,53 @@ const rejects = [
   ["\0nul", "NUL byte"],
   ["ok\0inside", "NUL byte"],
 ];
-for (const [inp, label] of rejects) {
-  t("rejects " + label + ": " + JSON.stringify(inp), () => {
+for (const [inp, label] of relRejects) {
+  t("path rejects " + label + ": " + JSON.stringify(inp), () => {
     assert.throws(() => sanitizeRelativePath(inp));
   });
 }
 
-t("too long rejected", () => {
-  const s = "a".repeat(5000);
-  assert.throws(() => sanitizeRelativePath(s));
+t("too long path rejected", () => {
+  assert.throws(() => sanitizeRelativePath("a".repeat(5000)));
 });
 
-// --- helpers ---------------------------------------------------------------
-t("toSmbPath converts", () =>
-  assert.strictEqual(toSmbPath("a/b/c"), "a\\b\\c"));
+// ==== sanitizeFilename ======================================================
+t("filename plain", () => assert.strictEqual(sanitizeFilename("hello.pdf"), "hello.pdf"));
+t("filename with inner spaces", () =>
+  assert.strictEqual(sanitizeFilename("invoice 2026.pdf"), "invoice 2026.pdf"));
+t("filename unicode", () =>
+  assert.strictEqual(sanitizeFilename("küche.jpg"), "küche.jpg"));
 
+const filenameRejects = [
+  ["", "empty"],
+  ["   ", "whitespace only"],
+  [".", "dot"],
+  ["..", "dotdot"],
+  ["a/b", "contains slash"],
+  ["a\\b", "contains backslash"],
+  ["with\0nul", "NUL byte"],
+  ["ctrl\x1fchar", "control char"],
+  ["quest?.txt", "question mark"],
+  ['star*.txt', "star"],
+  ['name"here.txt', "double quote"],
+  ["pipe|name", "pipe"],
+  ["colon:name", "colon"],
+  ["angle<name>", "angle brackets"],
+  ["ends.", "trailing dot"],
+  ["ends ", "trailing space"],
+  ["CON", "reserved device CON"],
+  ["nul.txt", "reserved device NUL with ext"],
+  ["COM1", "reserved device COM1"],
+  ["a".repeat(300), "too long"],
+];
+for (const [inp, label] of filenameRejects) {
+  t("filename rejects " + label + ": " + JSON.stringify(inp), () => {
+    assert.throws(() => sanitizeFilename(inp));
+  });
+}
+
+// ==== helpers ==============================================================
+t("toSmbPath converts", () => assert.strictEqual(toSmbPath("a/b/c"), "a\\b\\c"));
 t("toSmbUrl encodes", () => {
   const url = toSmbUrl(
     { server: "srv", share: "docs", base_path: "proj" },

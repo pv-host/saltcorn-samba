@@ -11,7 +11,7 @@
 
 /* ---- file manager ---- */
 .samba-fm .card-header { background: transparent; }
-.samba-fm-toolbar { background: #fafafa; }
+.samba-fm-toolbar { background: #fafafa; display: flex; align-items: center; flex-wrap: wrap; gap: .25rem; }
 .samba-fm-toolbar .breadcrumb { background: transparent; padding: 0; margin: 0; font-size: .9rem; }
 .samba-fm-table thead th {
   position: sticky; top: 0; background: #fff; z-index: 1;
@@ -24,3 +24,46 @@
 .samba-fm-name:hover { text-decoration: underline; color: #0d6efd; }
 .samba-fm-viewer:empty { display: none; }
 .samba-fm-viewer iframe { background: #fff; }
+
+/* ---- modal ---- */
+.samba-modal-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.45);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 2000;
+}
+.samba-modal {
+  width: min(560px, 92vw);
+  max-height: 90vh; overflow: auto;
+  background: #fff;
+  box-shadow: 0 10px 40px rgba(0,0,0,.25);
+}
+.samba-modal-body { padding: 1rem 1.25rem; }
+.samba-modal-footer { padding: .75rem 1rem; background: #f8f9fa; }
+
+/* ---- toast ---- */
+.samba-toast {
+  position: fixed; right: 1rem; bottom: 1rem;
+  background: #212529; color: #fff;
+  padding: .6rem 1rem; border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.25);
+  z-index: 2100;
+  transition: opacity .25s, transform .25s;
+  max-width: 420px;
+}
+.samba-toast-success { background: #198754; }
+.samba-toast-error { background: #dc3545; }
+.samba-toast-hide { opacity: 0; transform: translateY(10px); }
+
+/* ---- upload drop zone ---- */
+.samba-drop {
+  cursor: pointer;
+  transition: background .15s, border-color .15s;
+  border-style: dashed !important;
+}
+.samba-drop:hover, .samba-drop-active {
+  background: rgba(13,110,253,.06);
+  border-color: #0d6efd !important;
+  color: #0d6efd;
+}
+.samba-picked ul { max-height: 12rem; overflow: auto; }

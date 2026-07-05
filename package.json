@@ -1,7 +1,7 @@
 {
   "name": "saltcorn-samba",
-  "version": "0.2.0",
-  "description": "Saltcorn plugin: browse and display files from a Samba/CIFS share. File-manager view, directory tree, inline PDF viewer, external-app open (smb://).",
+  "version": "0.3.0",
+  "description": "Saltcorn plugin: browse, upload, rename and delete files on a Samba/CIFS share. File-manager view, directory tree, inline PDF viewer, external-app open (smb://).",
   "main": "index.js",
   "scripts": {
     "test": "node test/sanitize.test.js",
@@ -17,6 +17,7 @@
     "pdf",
     "file-manager",
     "files",
+    "upload",
     "no-code"
   ],
   "author": "Peter Vassen <ich@peter-vassen.de>",
