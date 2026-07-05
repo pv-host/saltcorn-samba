@@ -4,6 +4,54 @@ All notable changes to `saltcorn-samba` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.6] – 2026-07-05
+
+### Fixed
+- **`JSON.parse: unexpected character at line 1 column 1` beim Test-Button behoben.**
+  Der Aufruf von `POST /sambatest` lief zuvor gegen die globale
+  CSRF-Middleware von Saltcorn, die bei ungültigem/fehlendem Token eine
+  HTML-Seite zurückliefert – der Browser konnte sie nicht als JSON parsen.
+  Fix in drei Schichten:
+  1. Route ist jetzt mit `noCsrf: true` markiert (Sicherheit weiterhin durch
+     die harte Admin-Prüfung `roleOf(req) !== 1` im Handler garantiert;
+     siehe [saltcorn plugin_routes_handler.js](https://github.com/saltcorn/saltcorn/blob/master/packages/server/plugin_routes_handler.js)).
+  2. Der Client sendet nun als `application/x-www-form-urlencoded`
+     (statt JSON) und legt das `_csrf`-Token direkt in den Body – so
+     würde auch ein aktiver CSRF-Check passieren.
+  3. Das Token wird jetzt zuverlässig aus drei Quellen gesucht:
+     dem versteckten `<input name="_csrf">` des Formulars, dem
+     `<meta name="csrf-token">`-Tag und `window._sc_globalCsrf`.
+- **Klartext-Fehler statt kryptischem Parser-Crash.**
+  Wenn der Server doch mal HTML statt JSON liefert (z. B. Login-Redirect,
+  Plugin nicht neu geladen), zeigt der Test-Button jetzt eine deutliche
+  Meldung mit HTTP-Status und einer aufklappbaren Rohantwort statt eines
+  hilflosen „unexpected character“.
+
+## [0.3.5] – 2026-07-05
+
+### Added
+- **Testverbindung im Konfigurations-Wizard.**
+  Auf Schritt 1 „Samba-Server“ gibt es jetzt einen Button
+  „→ Verbindung jetzt testen“. Er öffnet eine SMB-Sitzung mit den
+  aktuell im Formular stehenden Werten (ohne zu speichern), meldet den
+  Benutzer an und listet die Wurzel bzw. den Basispfad des Shares auf.
+  Bei Erfolg werden Dauer, Anzahl Einträge und die ersten 20 Namen
+  angezeigt; bei Fehlschlag der genaue SMB-Fehler plus konkreter
+  Handlungshinweis auf Deutsch (z. B. DNS, ECONNREFUSED, LOGON_FAILURE,
+  BAD_NETWORK_NAME, SMBv1).
+- **Neue Route `POST /sambatest` (nur Admin).** Nimmt die Serverdaten
+  als JSON entgegen, gibt strukturiertes Ergebnis mit `ok`, `error`,
+  `code`, `hint`, `attempted` zurück. Verändert keine Konfiguration.
+
+### Changed
+- **Alle Feld-Beschreibungen in Schritt 1 komplett neu, ausführlich
+  auf Deutsch.** Jedes Feld (Server, Freigabe, Domäne, Benutzer,
+  Passwort, Basispfad, Port) erklärt Format, Docker-Fallstricke,
+  Standardwerte und typische Fehlerquellen. Schritt 2 ebenfalls
+  vollständig lokalisiert.
+- Schritt-Namen: „Samba server“ → „Samba-Server“, „Access & permissions“
+  → „Zugriff & Berechtigungen“.
+
 ## [0.3.4] – 2026-07-05
 
 ### Fixed

@@ -98,20 +98,22 @@ docker exec -it <saltcorn-container> \
 Nach der Installation unter *Einstellungen → Plugins → saltcorn-samba →
 Configure* ausfüllen. Die Konfiguration ist zweistufig:
 
-### Schritt 1 — *Samba server*
+### Schritt 1 — *Samba-Server*
 
 | Feld | Beispiel | Beschreibung |
 |---|---|---|
-| Server | `192.168.1.10` | Hostname oder IP des Samba-Servers |
-| Share name | `documents` | Name des Shares (ohne Slashes) |
-| Domain / Workgroup | `WORKGROUP` | optional |
-| Username | `saltcorn-user` | SMB-Benutzer |
-| Password | *(secret)* | wird im Saltcorn-Konfigstore gespeichert |
-| Base path | `projects` | *optional* — beschränkt jeden Zugriff auf dieses Unterverzeichnis |
-| Port | `445` | Standard-SMB2-Port |
-| SMB host visible to clients | `fileserver.lan` | *optional* — Host, der in `smb://`-Links auftaucht (nützlich in Docker) |
+| **Server** | `192.168.1.20`, `nas01`, `fileserver.local` | Hostname oder IP des Samba-Servers, **ohne** `smb://`-Präfix und **ohne** Backslashes. Muss aus Sicht des Saltcorn-Prozesses auflösbar sein. **In Docker:** nicht `localhost` verwenden – stattdessen LAN-IP des Hosts oder Container ins passende Netzwerk hängen. |
+| **Freigabe / Share-Name** | `daten`, `public`, `projekte` | Name der SMB-Freigabe **ohne** Slashes. Auf dem Server als `[NAME]`-Abschnitt in `smb.conf` bzw. unter Windows als Freigabename sichtbar. Nicht die Ordner-Bezeichnung. |
+| **Domäne / Arbeitsgruppe** | `WORKGROUP`, `CONTOSO` | Meist `WORKGROUP` (Standard). Für Active Directory: NetBIOS-Name der Domäne, nicht der FQDN. |
+| **Benutzername** | `saltcorn` | Samba-/AD-Benutzer, **nicht** im Format `DOMAIN\user` (Domäne gehört in das eigene Feld). Leer lassen für anonymen Zugriff (nur bei `guest ok = yes`). |
+| **Passwort** | *(secret)* | Samba nutzt ein eigenes Passwort (`smbpasswd`), nicht zwingend das Linux-Login. Moderne Server lehnen leere Passwörter ab. |
+| **Basispfad** | `projekte/2026` | Optional. Relativ, mit Slashes, **ohne** führenden `/`. Beschränkt jeden Zugriff auf dieses Unterverzeichnis der Freigabe. `..` und absolute Pfade werden abgelehnt. |
+| **TCP-Port** | `445` | Standard SMB2/3 über TCP. **SMBv1 (139) wird nicht unterstützt** – auf dem Server `min protocol = SMB2` setzen. |
 
-### Schritt 2 — *Access & permissions*
+> **Tipp:** Bevor Sie speichern, klicken Sie auf **„→ Verbindung jetzt
+> testen“** – siehe Abschnitt [Verbindung testen](#verbindung-testen).
+
+### Schritt 2 — *Zugriff & Berechtigungen*
 
 | Feld | Default | Beschreibung |
 |---|---|---|
@@ -129,7 +131,37 @@ Configure* ausfüllen. Die Konfiguration ist zweistufig:
 - Nur die Features aktivieren, die wirklich gebraucht werden.
 - Auf dem Samba-Server einen separaten Nutzer mit passenden Rechten anlegen
   (read-only wenn nur gelesen werden soll).
-- Zusätzlich mit *Base path* den Zugriff auf ein Unterverzeichnis begrenzen.
+- Zusätzlich mit *Basispfad* den Zugriff auf ein Unterverzeichnis begrenzen.
+
+### Verbindung testen
+
+Direkt im Konfigurations-Wizard (Schritt 1) gibt es den Button
+**„→ Verbindung jetzt testen“**. Er sendet die aktuell im Formular
+stehenden Werte an die interne Route `POST /sambatest` (nur für Admins),
+baut eine SMB-Verbindung auf und listet den Basispfad bzw. die
+Share-Wurzel auf. Es werden dabei **keine** Daten gespeichert oder
+geschrieben.
+
+- **Erfolg (grün):** Dauer der Verbindung, Anzahl gefundener Einträge
+  und die ersten 20 Namen (Datei/Ordner) werden angezeigt.
+- **Fehler (rot):** Der SMB-/Netzwerk-Fehler wird im Klartext gezeigt,
+  zusammen mit einem konkreten Handlungshinweis auf Deutsch, z. B.:
+  - `ECONNREFUSED` → Samba läuft nicht oder Firewall/Docker blockt 445
+  - `ETIMEDOUT` → Host nicht erreichbar (Ping/`nc -vz`)
+  - `ENOTFOUND` → DNS-Auflösung fehlgeschlagen (IP verwenden)
+  - `LOGON_FAILURE` / `ACCESS_DENIED` → Benutzer, Passwort oder Domäne falsch
+  - `BAD_NETWORK_NAME` → Share-Name existiert so nicht auf dem Server
+  - `SMB1 / protocol` → Server bietet nur SMBv1 an (nicht unterstützt)
+
+Die Route kann zusätzlich auch von Skripten aufgerufen werden:
+
+```bash
+curl -X POST -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $CSRF" \
+  --cookie "$COOKIES" \
+  -d '{"server":"192.168.1.20","share":"daten","username":"u","password":"p"}' \
+  https://saltcorn.example.com/sambatest
+```
 
 ---
 
