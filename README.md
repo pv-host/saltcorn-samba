@@ -12,7 +12,24 @@ Features:
 - 📄 **Inline-PDF-/Bild-Anzeige** direkt im `SambaFileManager` (Klick auf eine Datei), plus Download- und externe-App-Buttons.
 - 🚀 **`smb://`-Links** — Öffnet Dateien und Ordner direkt in Nemo, Nautilus, Dolphin (Linux) oder Explorer (Windows).
 - 🔒 **Sicherheit** — Base-Path als „Chroot", strenge Path-Traversal-Prüfung (`..`, absolute Pfade, UNC, Drive-Letters, NUL-Bytes), CSRF-Schutz auf Schreib-Routen, Filename-Sanitizer, Extension-Blocklist, rollenbasierter Zugriff (getrennte Lese-/Schreib-Rollen).
-- 🐳 **Docker-freundlich** — direkt per SMB2-Protokoll, keine System-Binaries nötig.
+- 🔐 **Moderne SMB-Kryptografie** — SMB 3.1.1 mit **AES-128-CMAC-Signing** (Pflicht auf aktuellen Samba-Servern) und optionaler **AES-CCM/GCM-Verschlüsselung**. Signing- und Encryption-Modus per Config-Dropdown wählbar (`if-offered` / `required` / `disabled`). **Keine Legacy-Cipher** (DES-ECB) mehr nötig — läuft ohne `--openssl-legacy-provider` unter Node 20+.
+- 🐳 **Docker-freundlich** — direkt per SMB2/3-Protokoll, keine System-Binaries nötig.
+
+> **Voraussetzungen:** **Node.js ≥ 20** (wegen der ESM-basierten [`smb3-client`](https://www.npmjs.com/package/smb3-client) Library, die intern per dynamic `import()` geladen wird). Saltcorn 0.9+ wird unterstützt.
+
+---
+
+## Was ist neu in 0.4.0 (Migration von 0.3.x)
+
+Das Plugin wurde intern von der unmaintained `@marsaud/smb2` auf die moderne
+`smb3-client` umgestellt. **Kein Config-Umbau nötig** — die neuen Felder
+`SMB-Signing` und `SMB-Verschlüsselung` haben sinnvolle Defaults (`if-offered`).
+Dadurch:
+
+- ✅ funktioniert wieder gegen moderne Samba-Server, die `sign_algo_id != 0`
+  (AES-CMAC) verlangen,
+- ✅ **kein** `--openssl-legacy-provider`-Flag mehr nötig,
+- ⚠️ **Breaking:** Node.js ≥ 20 zwingend erforderlich (vorher 16 möglich).
 
 ---
 
@@ -109,6 +126,8 @@ Configure* ausfüllen. Die Konfiguration ist zweistufig:
 | **Passwort** | *(secret)* | Samba nutzt ein eigenes Passwort (`smbpasswd`), nicht zwingend das Linux-Login. Moderne Server lehnen leere Passwörter ab. |
 | **Basispfad** | `projekte/2026` | Optional. Relativ, mit Slashes, **ohne** führenden `/`. Beschränkt jeden Zugriff auf dieses Unterverzeichnis der Freigabe. `..` und absolute Pfade werden abgelehnt. |
 | **TCP-Port** | `445` | Standard SMB2/3 über TCP. **SMBv1 (139) wird nicht unterstützt** – auf dem Server `min protocol = SMB2` setzen. |
+| **SMB-Signing** | `if-offered` | `if-offered` (Standard), `required` oder `disabled`. Nutzt HMAC-SHA256 (SMB 2.x) bzw. AES-128-CMAC (SMB 3.x). Moderne Samba-Server verlangen häufig Signing → `required` oder `if-offered`. |
+| **SMB-Verschlüsselung** | `if-offered` | `if-offered` (Standard), `required` oder `disabled`. Nutzt AES-128/256-CCM/GCM. Shares mit serverseitigem `SMB2_SHAREFLAG_ENCRYPT_DATA` erzwingen Verschlüsselung ohnehin. |
 
 > **Tipp:** Bevor Sie speichern, klicken Sie auf **„→ Verbindung jetzt
 > testen“** – siehe Abschnitt [Verbindung testen](#verbindung-testen).
@@ -328,6 +347,73 @@ Saltcorn führt `npm install` im Plugin-Ordner automatisch aus.
 3. Beschreibung + Kategorie eintragen
 
 Ab dann taucht das Plugin im Plugins-Store jeder Saltcorn-Instanz auf.
+
+---
+
+## Troubleshooting
+
+### `ERR_MODULE_NOT_FOUND` / „Cannot find package 'smb3-client'" / Worker startet nicht
+
+Das Plugin lädt `smb3-client` (ESM) via dynamic `import()` — das npm-Paket
+muss also im Plugin-Ordner installiert sein.
+
+```bash
+cd /pfad/zu/saltcorn-samba
+npm install
+saltcorn restart   # oder systemd/docker-Neustart
+```
+
+Bei Installation über die Saltcorn-Plugin-UI (Source `npm` oder `github`)
+führt Saltcorn `npm install` automatisch aus.
+
+### `STATUS_INVALID_PARAMETER` / „sign_algo_id=0" im Samba-Log
+
+Das war der Fehler in **0.3.x mit `@marsaud/smb2`**: moderne Samba-Server
+(Ubuntu 22.04+ / Debian 12+ / RHEL 9+) verlangen **AES-CMAC-Signing**, das
+die alte Library nicht konnte. **In 0.4.0 gelöst** — die neue `smb3-client`-
+Library implementiert AES-CMAC. Falls die Meldung dennoch auftaucht:
+
+- In der Plugin-Config **SMB-Signing = `required`** setzen (erzwingt
+  AES-CMAC schon beim Handshake).
+- Auf dem Server sicherstellen, dass `server signing = mandatory` gesetzt
+  ist, dann in der Client-Config ebenfalls `required` wählen.
+
+### `ERR_OSSL_EVP_UNSUPPORTED` / `--openssl-legacy-provider`
+
+**Betrifft 0.4.0 nicht mehr.** Die alte Abhängigkeit `@marsaud/smb2` nutzte
+intern DES-ECB (aus dem transitiven `ntlm`-Paket), das ab OpenSSL 3
+deaktiviert ist. `smb3-client` verwendet ausschließlich moderne Cipher
+(HMAC-SHA256, AES-128-CMAC, AES-CCM/GCM, SHA-512-PreAuth-Integrity).
+**Das `NODE_OPTIONS=--openssl-legacy-provider`-Flag darf und sollte in
+0.4.0 wieder entfernt werden.**
+
+### Signing- und Verschlüsselungs-Modi
+
+Beide Modi haben denselben Wertebereich:
+
+| Wert | Verhalten |
+|---|---|
+| `if-offered` **(Standard)** | Wird genutzt, wenn der Server es anbietet. Kompatibel mit alten und neuen Servern. |
+| `required` | Wird zwingend verlangt. Verbindung schlägt fehl, wenn der Server nicht mitmacht. Empfohlen für Produktionsumgebungen. |
+| `disabled` | Wird nicht angefordert. Nur für Legacy-Server oder isolierte LAN-Setups. Nicht mit Servern kombinieren, die Signing/Encryption erzwingen. |
+
+Typische Fehlermeldungen und was zu tun ist:
+
+| Symptom | Wahrscheinliche Ursache | Lösung |
+|---|---|---|
+| `bad signature` / `SIGNATURE_MISMATCH` | Uhrzeit-Drift zwischen Client und Server, oder falsche Credentials | Zeit synchronisieren (NTP), Passwort prüfen |
+| `preauth integrity` | Man-in-the-Middle oder Netzwerkproblem | Netzwerkpfad prüfen (VPN, Proxy) |
+| Verbindung schlägt bei `required` fehl | Server bietet Modus nicht an | Server konfigurieren oder Modus auf `if-offered` senken |
+
+### Weitere häufige Fehler
+
+| Symptom | Ursache | Lösung |
+|---|---|---|
+| `ECONNREFUSED :445` | SMB-Dienst läuft nicht oder Firewall blockt Port 445 | `nc -vz <server> 445` vom Saltcorn-Host testen |
+| `ETIMEDOUT` | Kein Netzwerkpfad (VLAN/Docker-Bridge/VPN) | Vom Saltcorn-Container aus `ping` + `nc -vz` prüfen |
+| `LOGON_FAILURE` / `STATUS_LOGON_FAILURE` | User/Passwort/Domain falsch | Zugangsdaten prüfen. Moderne Samba-Server erlauben keine leeren Passwörter |
+| `BAD_NETWORK_NAME` / `STATUS_BAD_NETWORK_NAME` | Share existiert nicht oder Schreibweise falsch | `smbclient -L //server -U user` zur Kontrolle |
+| Nur SMBv1 verfügbar | Server bietet SMB2/3 nicht an | In `smb.conf`: `min protocol = SMB2` |
 
 ---
 

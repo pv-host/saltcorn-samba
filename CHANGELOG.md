@@ -4,6 +4,158 @@ All notable changes to `saltcorn-samba` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] – 2026-07-05
+
+### ⚠️ BREAKING CHANGES
+
+- **Node.js ≥ 20 wird jetzt zwingend benötigt** (vorher war 16 möglich).
+  Grund: die neue Dependency `smb3-client` ist ein Pure-ESM-Paket und wird
+  im Plugin über dynamic `import()` aus CommonJS geladen — das ist ab
+  Node 20 stabil.
+- **Dependency-Wechsel:** `@marsaud/smb2` wurde vollständig entfernt und
+  durch [`smb3-client`](https://www.npmjs.com/package/smb3-client) `^0.2.0`
+  ersetzt.
+- **Zwei neue Config-Felder** in Schritt 1 des Konfigurations-Wizards:
+  - `SMB-Signing` (Werte: `if-offered` / `required` / `disabled`, Default `if-offered`)
+  - `SMB-Verschlüsselung` (Werte: `if-offered` / `required` / `disabled`, Default `if-offered`)
+
+  Es ist **kein manueller Config-Umbau nötig** — die Defaults sind für
+  fast alle Setups sinnvoll. Wer aus Sicherheitsgründen Signing oder
+  Encryption erzwingen will, kann jetzt `required` wählen.
+
+### Fixed – **Moderne Samba-Server (`sign_algo_id=0` / AES-CMAC-Pflicht)**
+
+Symptom nach dem 0.3.11-Update: nach dem Setzen von
+`NODE_OPTIONS=--openssl-legacy-provider` startete Saltcorn wieder, aber im
+Samba-Log erschien beim ersten Zugriff:
+
+```
+smbd: sign_algo_id=0 in negotiate response, expected AES-CMAC (2) or higher
+```
+
+gefolgt von `STATUS_INVALID_PARAMETER` und einem 401-Fehler im Plugin.
+
+**Ursache:** Aktuelle Samba-Versionen (Ubuntu 22.04+ / Debian 12+ /
+RHEL 9+) verlangen im SMB-3.1.1-Handshake das moderne Signing-Verfahren
+**AES-128-CMAC** (`SigningAlgorithmId 2`). `@marsaud/smb2` (letztes
+Release 2020, unmaintained) implementiert diese Cipher-Suite nicht — es
+kann nur die alten HMAC-SHA256- bzw. HMAC-MD5-Signaturen und meldet
+sich mit `sign_algo_id=0`, was ein moderner Samba als Protokoll-Fehler
+verwirft.
+
+**Lösung — kompletter Wechsel der SMB-Client-Library:**
+
+| Aspekt | Vorher (`@marsaud/smb2`) | Nachher (`smb3-client` 0.2.0) |
+|---|---|---|
+| Protokoll | SMB 2.0 / 2.1 | SMB 2.1 / 3.0 / 3.0.2 / **3.1.1** |
+| Signing | HMAC-SHA256 (nur) | HMAC-SHA256 **+ AES-128-CMAC** |
+| Encryption | – | AES-128-CCM / AES-128-GCM (optional) |
+| Pre-Auth | – | SHA-512 Pre-Auth-Integrity |
+| Auth | NTLM (via `ntlm`, DES-ECB) | **NTLMv2 / SPNEGO** (ohne DES-ECB) |
+| Wartung | Letztes Release Q4 2020 | Aktiv (Mai 2026) |
+| Runtime-Deps | `ntlm`, `iconv-lite` | **keine** |
+| API | Callback | **Promise / async** |
+| Modul-System | CommonJS | Pure ESM (via dynamic import geladen) |
+
+### Removed
+
+- Legacy-Crypto-Check-Utility (`checkLegacyCryptoAvailable`,
+  `legacyCryptoErrorMessage`) sowie zugehöriger Handshake-Block in der
+  `/sambatest`-Route und im Test-Panel — nicht mehr nötig, weil
+  `smb3-client` keine Legacy-Cipher (DES-ECB) verwendet.
+- Troubleshooting-Abschnitt zum `--openssl-legacy-provider`-Flag im README
+  (durch neuen 0.4.0-Kompatibilitätsabschnitt ersetzt).
+
+### Changed
+
+- `smb-client.js` komplett neu geschrieben als dünner Wrapper um
+  `smb3-client`. Interne API (`buildClient`, `withClient`, `readdir`,
+  `readFile`, `writeFile`, `rename`, `unlink`, `mkdir`, `rmdir`) bleibt
+  identisch — kein Anpassungsbedarf in den View- oder Route-Handlern.
+- Pfad-Konvention intern umgestellt: `smb3-client` erwartet den Share als
+  erstes Segment jedes Pfads (`share/subdir/datei.pdf`) statt separat im
+  Constructor. Der Wrapper prependet den Share-Namen transparent, sodass
+  Aufrufer weiterhin nur relative Pfade (`subdir/datei.pdf`) übergeben.
+- Readdir-Ergebnisse werden pro Eintrag mit einem parallelen `stat()`-
+  Aufruf (Batch-Größe 16) angereichert, weil `smb3-client`-Dirents nur
+  `name` + `isFile()` + `isDirectory()` liefern — der Plugin-Filemanager
+  braucht aber weiterhin Größe und mtime.
+- Fehler-Mapping in `/sambatest` erweitert um typische Signing-/
+  Encryption-/Pre-Auth-Fehlermeldungen aus `smb3-client` (`bad signature`,
+  `preauth integrity`, `encryption`).
+
+### Migration
+
+1. Saltcorn stoppen.
+2. Plugin auf 0.4.0 aktualisieren (npm bzw. neues ZIP entpacken).
+3. Falls gesetzt: `NODE_OPTIONS=--openssl-legacy-provider` **entfernen**
+   (nicht mehr nötig; siehe README-Abschnitt „Troubleshooting →
+   ERR_OSSL_EVP_UNSUPPORTED").
+4. Sicherstellen, dass **Node.js ≥ 20** installiert ist (`node -v`).
+5. Saltcorn wieder starten. Die Plugin-Config bleibt gültig — die neuen
+   Felder `SMB-Signing` und `SMB-Verschlüsselung` erhalten automatisch
+   den Default `if-offered`. Wer maximale Sicherheit möchte, setzt beide
+   auf `required` (Voraussetzung: der Samba-Server unterstützt es).
+6. Im Config-Wizard einmal „→ Verbindung jetzt testen" klicken.
+
+## [0.3.11] – 2026-07-05
+
+### Fixed – **Worker-Crash / 502 durch DES-ECB auf Node 17+ / OpenSSL 3**
+
+Symptom nach dem 0.3.10-Update:
+
+```
+node:internal/crypto/cipher:117
+Error: error:0308010C:digital envelope routines::unsupported
+    at Cipheriv.createCipherBase ...
+    at .../@marsaud/smb2/node_modules/ntlm/lib/smbhash.js:46
+code: 'ERR_OSSL_EVP_UNSUPPORTED'
+worker died
+```
+
+Auf der Config-Seite dann: **„Antwort war kein JSON (HTTP 502)“**.
+
+**Ursache:** `@marsaud/smb2` benutzt über das transitive Paket `ntlm` den
+Cipher **DES-ECB** zur Berechnung der LM/NTLM-Hashes. Node.js ab Version 17
+ist gegen OpenSSL 3 gebaut, das DES-ECB standardmäßig blockiert. Der
+`createCipheriv("des-ecb", ...)`-Aufruf wirft dann synchron
+`ERR_OSSL_EVP_UNSUPPORTED`. Weil der Fehler synchron aus tiefen Callback-
+Aufrufen kommt, tötet er den Saltcorn-Worker-Prozess → der Reverse-Proxy
+liefert 502 → die Route liefert kein JSON.
+
+**Fixes in diesem Release:**
+
+1. **Präventiver Check in `smb-client.js`:** Beim ersten Aufbau eines
+   SMB-Clients wird geprüft, ob `crypto.createCipheriv("des-ecb", ...)`
+   funktioniert. Wenn nicht, wird eine saubere, ausführliche deutsche
+   Fehlermeldung mit Lieferanleitung geworfen (`E_LEGACY_CRYPTO`) — der
+   fehlerhafte NTLM-Code wird gar nicht erst betreten, der Worker überlebt.
+2. **`/sambatest`-Route:** Der Check läuft zusätzlich explizit **vor**
+   dem `withClient`-Aufruf und liefert JSON mit `code: "E_LEGACY_CRYPTO"`,
+   `error`, `hint`, `node_version` und `openssl_version` — damit steht der
+   Diagnose-Grund direkt in der UI, nicht im Server-Log.
+3. **Fehler-Mapping erweitert:** Falls der Crash doch mal aus einem
+   anderen Pfad kommt (z. B. spätere Reconnect-Versuche), erkennt die
+   Catch-Logik jetzt auch `ERR_OSSL_EVP_UNSUPPORTED`,
+   `digital envelope routines` und `unsupported` und liefert einen
+   verständlichen Hinweis.
+4. **README:** Neuer Abschnitt „Troubleshooting“ mit Setup-Rezepten für
+   `NODE_OPTIONS=--openssl-legacy-provider` (Umgebungsvariable, systemd,
+   Docker/Compose, PM2, direkter Aufruf) plus Tabelle mit den häufigsten
+   Verbindungsfehlern und Diagnose-Kommandos.
+
+### Notes
+- Das Plugin ändert keinen Node-Startparameter selbst — das können wir aus
+  Sicherheits- und Prozessgründen nicht (Node-Flags müssen beim Prozess-
+  Start gesetzt werden). Der Fix ist eine saubere Fehlererkennung mit
+  Lösungsanleitung.
+- Sobald Saltcorn mit `NODE_OPTIONS=--openssl-legacy-provider` läuft,
+  funktionieren Verbindungstest und alle SMB-Operationen ohne weitere
+  Anpassung.
+- **Roadmap:** Migration weg von `@marsaud/smb2` (letzter Release 2020) hin
+  zu einer aktiv gepflegten SMB-Client-Bibliothek, damit das
+  Legacy-Provider-Flag nicht mehr nötig ist.
+
 ## [0.3.10] – 2026-07-05
 
 ### Fixed – **DNS-Fehler: `getaddrinfo ENOTFOUND "host:445"`**

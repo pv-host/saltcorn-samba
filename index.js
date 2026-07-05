@@ -92,13 +92,15 @@ window.sambaTestConn = async function(btn) {
   if (!form) { out.innerHTML = '<div class="alert alert-danger">Formular nicht gefunden.</div>'; return; }
   function v(n){ var el = form.querySelector('[name="'+n+'"]'); return el ? el.value : ''; }
   var payload = {
-    server:    v('server'),
-    share:     v('share'),
-    domain:    v('domain'),
-    username:  v('username'),
-    password:  v('password'),
-    base_path: v('base_path'),
-    port:      v('port')
+    server:          v('server'),
+    share:           v('share'),
+    domain:          v('domain'),
+    username:        v('username'),
+    password:        v('password'),
+    base_path:       v('base_path'),
+    port:            v('port'),
+    signing_mode:    v('signing_mode'),
+    encryption_mode: v('encryption_mode')
   };
   if (!payload.server || !payload.share) {
     out.innerHTML = '<div class="alert alert-warning">Bitte mindestens <b>Server</b> und <b>Share</b> ausfüllen.</div>';
@@ -286,6 +288,46 @@ const configuration_workflow = () =>
                   "(<code>min protocol = SMB2</code> in smb.conf).",
                 type: "Integer",
                 default: 445,
+              }),
+              new Field({
+                name: "signing_mode",
+                label: "SMB-Signing",
+                sublabel:
+                  "Wie streng jede Nachricht kryptografisch signiert wird (HMAC-SHA256 für SMB 2.x, AES-128-CMAC für SMB 3.x). " +
+                  "<b>required</b>: Signing wird zwingend verlangt; Verbindung schlägt fehl, wenn der Server nicht signiert. " +
+                  "<b>if-offered</b> (Standard): Signing wird genutzt, wenn der Server es anbietet, sonst weiter ohne. " +
+                  "<b>disabled</b>: kein Signing (nur auswählen, wenn der Server Signing verweigert). " +
+                  "Moderne Samba-Server verlangen häufig Signing → „required“ oder „if-offered“ setzen.",
+                type: "String",
+                required: true,
+                attributes: {
+                  options: [
+                    { value: "if-offered", label: "if-offered (Standard)" },
+                    { value: "required",   label: "required (strikt)" },
+                    { value: "disabled",   label: "disabled (aus)" },
+                  ],
+                },
+                default: "if-offered",
+              }),
+              new Field({
+                name: "encryption_mode",
+                label: "SMB-Verschlüsselung",
+                sublabel:
+                  "Verschlüsselung der Nutzdaten auf dem Draht (AES-128/256-CCM/GCM). " +
+                  "<b>required</b>: Verbindung nur mit Verschlüsselung; scheitert, wenn der Server keine anbietet. " +
+                  "<b>if-offered</b> (Standard): Verschlüsselung wird genutzt, wenn der Server sie anbietet. " +
+                  "<b>disabled</b>: keine Verschlüsselung anfordern (nur für Legacy-Server oder LAN-Only-Setups). " +
+                  "Shares, die serverseitig <code>SMB2_SHAREFLAG_ENCRYPT_DATA</code> tragen, erzwingen Verschlüsselung ohnehin.",
+                type: "String",
+                required: true,
+                attributes: {
+                  options: [
+                    { value: "if-offered", label: "if-offered (Standard)" },
+                    { value: "required",   label: "required (strikt)" },
+                    { value: "disabled",   label: "disabled (aus)" },
+                  ],
+                },
+                default: "if-offered",
               }),
               new Field({
                 name: "_test_html",
@@ -742,6 +784,8 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
         password: String(body.password || ""),
         base_path: String(body.base_path || "").trim(),
         port: Number(body.port) || 445,
+        signing_mode: String(body.signing_mode || "").trim() || undefined,
+        encryption_mode: String(body.encryption_mode || "").trim() || undefined,
       };
 
       if (!testCfg.server) return jsonError(res, 400, "Please enter a Server (hostname or IP).");
@@ -798,6 +842,14 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
           hint = "The server may be offering only SMBv1 which this plugin does not support. Enable SMB2 / SMB3 on the Samba server (min protocol = SMB2 in smb.conf).";
         else if (m.includes("traversal") || m.includes("path"))
           hint = "The Base path could not be validated. It must be a relative sub-directory (e.g. 'projects/2026'), never start with / or \\, and must not contain '..'.";
+        else if (m.includes("bad signature") || m.includes("sign_algo") || m.includes("signing"))
+          hint = "Signaturprüfung fehlgeschlagen. Setze in der Plugin-Config unter „SMB-Signing“ auf „if-offered“ oder prüfe auf dem Server, ob AES-CMAC unterstützt wird.";
+        else if (m.includes("pre-auth") || m.includes("preauth"))
+          hint = "Pre-Auth-Integrity fehlgeschlagen. Server und Client müssen SMB 3.1.1 sprechen. Auf Samba: 'server min protocol = SMB3_11' prüfen.";
+        else if (m.includes("encryption") || m.includes("encrypted"))
+          hint = "Verschlüsselungs-Verhandlung fehlgeschlagen. In der Plugin-Config „SMB-Verschlüsselung“ auf „if-offered“ setzen oder den Server so konfigurieren, dass er AES-GCM/CCM anbietet.";
+        else if (code === "ERR_OSSL_EVP_UNSUPPORTED" || m.includes("digital envelope routines"))
+          hint = "Node blockiert Legacy-Cipher. Ab v0.4.0 nutzt das Plugin smb3-client statt @marsaud/smb2 — diese Meldung sollte eigentlich nicht mehr auftreten. Bitte README-Abschnitt zu SMB3-Verbindung prüfen.";
 
         return res.status(200).json({
           ok: false,
