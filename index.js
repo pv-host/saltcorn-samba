@@ -853,72 +853,85 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
           // to stat("") — that already proves the whole handshake
           // (TCP + Negotiate + Session + TREE_CONNECT + Auth) works, which
           // is all the connection test actually promises.
-          const rel = testCfg.base_path ? sanitizeRelativePath(testCfg.base_path) : "";
-          // When a base_path is set, verify it exists and is a directory
-          // BEFORE trying to enumerate it. This turns the opaque
-          // "CREATE failed: STATUS_OBJECT_NAME_NOT_FOUND" into a clear
-          // "Basispfad existiert nicht" hint the user can act on.
-          // We used to run a stat() first. That turned out to be flaky:
-          // smb3-client's stat() sends a CREATE with createOptions=0
-          // (no directory hint) which some Samba configurations reject
-          // for directories with strict ACLs. readdir() sends
-          // createOptions=1 (DIRECTORY_FILE) and is the right primitive
-          // for a base_path check anyway — we want to know the folder
-          // can actually be listed, not just opened.
+          //
+          // IMPORTANT: buildClient already stores `base_path` as the
+          // wrapper's `basePath`, and wrapper.readdir(x) resolves to
+          // `share/basePath/x`. So we call readdir("") to list the
+          // configured basePath itself — not readdir(base_path), which
+          // would append it twice (bug fixed in 0.4.8).
+          const rel = "";
+          const baseForDisplay = testCfg.base_path ? sanitizeRelativePath(testCfg.base_path) : "";
           try {
             return await client.readdir(rel);
           } catch (err) {
             // Look at both the wrapper error and its underlying cause.
             const causeMsg = String((err && err.cause && err.cause.message) || "");
             const msg      = String((err && err.message) || err || "") + " " + causeMsg;
-            const isRootProbe = !rel;
-            const isRootEnumBug = /0xC0000033|OBJECT_NAME_INVALID|Share-Root/i.test(msg);
-            if (isRootProbe && isRootEnumBug) {
-              // Fall back: proof-of-life via stat on share root. This
-              // confirms TCP + Negotiate + Session + Auth + TREE_CONNECT
-              // without hitting the broken QUERY_DIRECTORY path.
+            // The path we effectively asked the server to enumerate is
+            // `share/basePath` (rel is always "" here — basePath is the
+            // subdirectory to test).
+            const effectivePath = testCfg.share + (baseForDisplay ? "/" + baseForDisplay : "");
+            const isRootProbe = !baseForDisplay;
+            // smb3-client hardcodes FileInformationClass=37
+            // (FileIdBothDirectoryInformation) in QUERY_DIRECTORY. Some
+            // Samba 4.23+ configurations reject that with 0xC0000033
+            // (OBJECT_NAME_INVALID) for specific directories — even though
+            // the same directory can be opened, stat'd and traversed. In
+            // that case we fall back to a plain stat: if the folder exists
+            // (stat succeeds) we can prove the connection works, but flag
+            // that enumeration is broken so the caller shows the yellow
+            // hint instead of a red error.
+            const isEnumBug = /0xC0000033|OBJECT_NAME_INVALID|QUERY_DIRECTORY failed/i.test(msg);
+            if (isEnumBug) {
               try {
                 await client.stat("");
-                // Signal to the caller that the connection works, but
-                // the share root cannot be enumerated on this server.
                 const marker = [];
-                marker._rootNotEnumerable = true;
+                if (isRootProbe) {
+                  marker._rootNotEnumerable = true;
+                } else {
+                  marker._basePathNotEnumerable = true;
+                  marker._basePathForDisplay = baseForDisplay;
+                }
                 return marker;
               } catch (statErr) {
-                // stat also failed — surface the original error.
-                throw err;
+                // stat also failed — fall through to normal error handling
+                // (missing-basepath diagnostics or generic rethrow).
               }
             }
-            // A non-existent base_path (or one hidden from this user by
-            // Samba's "hide unreadable" behaviour) surfaces here. Try to
-            // gather actionable diagnostics: list the parent directory
-            // (if not the share root) and probe common alternative
-            // spellings of the missing segment so we can distinguish
-            // typo / case-mismatch / permission problems.
+            // NAME_NOT_FOUND / PATH_NOT_FOUND on a configured base_path.
+            // Gather diagnostics: raw probes against alternate spellings
+            // and (if possible) a listing of the parent directory.
             const isMissing = /OBJECT_NAME_NOT_FOUND|OBJECT_PATH_NOT_FOUND|ENOENT|STATUS_NO_SUCH_FILE|existiert.*nicht/i.test(msg);
-            if (rel && isMissing) {
-              const parts = rel.split("/").filter(Boolean);
+            if (baseForDisplay && isMissing) {
+              const parts = baseForDisplay.split("/").filter(Boolean);
               const missing = parts[parts.length - 1];
               const parent = parts.slice(0, -1).join("/");
               const parentAbs = parent || "(Share-Root)";
+              // Probe via the raw smb3-client so we bypass the wrapper's
+              // basePath prefix and can test siblings/alternate spellings
+              // directly from the share root.
+              const raw = client._raw;
+              const rawShare = client.shareName;
+              async function rawReaddir(relFromShareRoot) {
+                const full = relFromShareRoot ? rawShare + "/" + relFromShareRoot : rawShare;
+                return await raw.readdir(full, { withFileTypes: true });
+              }
               let siblings = null;
               let parent_error = null;
               if (parent) {
                 try {
-                  const listing = await client.readdir(parent);
+                  const listing = await rawReaddir(parent);
                   siblings = Array.isArray(listing)
                     ? listing.map((d) => ({
-                        name: d && (d.name || d),
-                        isDirectory: !!(d && (d.isDirectory === true || (typeof d.isDirectory === "function" && d.isDirectory()))),
+                        name: d && d.name,
+                        isDirectory: !!(d && typeof d.isDirectory === "function" && d.isDirectory()),
                       }))
                     : null;
                 } catch (parentErr) {
                   parent_error = String((parentErr && parentErr.message) || parentErr || "");
                 }
               }
-              // Probe alternate spellings: original, upper, lower, capitalised.
-              // This lets us report "Ordner existiert unter anderem Namen" if
-              // Samba is running with case sensitive = yes / case-preserved.
+              // Probe alternate spellings of the missing segment.
               const probes = [];
               const seen = new Set();
               const addProbe = (name) => {
@@ -932,16 +945,18 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
               addProbe(missing.charAt(0).toUpperCase() + missing.slice(1).toLowerCase());
               const probe_results = [];
               for (const p of probes) {
-                const candidate = parent ? parent + "/" + p : p;
+                // From-share-root path: `parent/candidate`. NEVER include
+                // client.basePath here — the raw client is share-relative.
+                const relFromShare = [parent, p].filter(Boolean).join("/");
                 let ok = false;
                 let perr = null;
                 try {
-                  await client.readdir(candidate);
+                  await rawReaddir(relFromShare);
                   ok = true;
                 } catch (pErr) {
                   perr = String((pErr && pErr.message) || pErr || "");
                 }
-                probe_results.push({ candidate: p, ok, error: ok ? null : perr });
+                probe_results.push({ candidate: p, tested_path: relFromShare, ok, error: ok ? null : perr });
               }
               const workingAlt = probe_results.find(
                 (r) => r.ok && r.candidate !== missing
@@ -949,25 +964,24 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
               let hintText;
               if (workingAlt) {
                 hintText =
-                  "Der Ordner heisst auf dem Server \u201e" +
+                  "Der Ordner hei\u00dft auf dem Server \u201e" +
                   workingAlt.candidate +
-                  "\u201c (andere Gross-/Kleinschreibung). Bitte den " +
+                  "\u201c (andere Gro\u00df-/Kleinschreibung). Bitte den " +
                   "Basispfad exakt so eintragen \u2014 der Samba-Server ist " +
                   "case-sensitive (\u201ecase sensitive = yes\u201c in smb.conf).";
               } else {
                 hintText =
-                  "Der Basispfad \u201e" + rel + "\u201c ist auf dem " +
-                  "Server nicht auffindbar. M\u00f6gliche Ursachen: " +
-                  "(a) der Ordner existiert wirklich nicht (bitte mit " +
-                  "einem SMB-Client wie \u201esmbclient\u201c oder dem " +
-                  "Windows-Explorer gegenpr\u00fcfen); " +
+                  "Der Basispfad \u201e" + baseForDisplay + "\u201c wurde auf der " +
+                  "Freigabe \u201e" + testCfg.share + "\u201c nicht " +
+                  "gefunden. Intern getestet wurde: \u201e" + effectivePath +
+                  "\u201c. M\u00f6gliche Ursachen: (a) Ordner existiert unter " +
+                  "genau diesem Namen nicht in dieser Freigabe (Basispfad ist " +
+                  "relativ zur Freigabe \u2014 also z.\u202fB. \u201eunterordner\u201c, " +
+                  "nicht \u201e" + testCfg.share + "/unterordner\u201c); " +
                   "(b) der angemeldete Benutzer \u201e" +
                   (testCfg.username || "(anonymous)") +
-                  "\u201c hat kein Leserecht auf den Ordner (Samba antwortet " +
-                  "dann bei \u201ehide unreadable = yes\u201c mit " +
-                  "NAME_NOT_FOUND statt ACCESS_DENIED); " +
-                  "(c) der Ordner ist per \u201eveto files\u201c / " +
-                  "\u201ehide files\u201c auf dem Server ausgeblendet.";
+                  "\u201c darf den Ordner nicht sehen; " +
+                  "(c) der Ordner ist per Samba-Konfiguration ausgeblendet.";
               }
               const e = new Error(hintText);
               e.cause = err;
@@ -988,6 +1002,7 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
         });
         const took = Date.now() - started;
         const rootNotEnum = Array.isArray(listing) && listing._rootNotEnumerable === true;
+        const baseNotEnum = Array.isArray(listing) && listing._basePathNotEnumerable === true;
         return res.json({
           ok: true,
           server: testCfg.server,
@@ -1004,11 +1019,18 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
           })),
           truncated: Array.isArray(listing) && listing.length > 20,
           note: rootNotEnum
-            ? "Verbindung + Anmeldung erfolgreich. Der Server erlaubt jedoch " +
-              "kein direktes Auflisten des Share-Roots (bekanntes Samba-" +
-              "Verhalten mit smb3-client). Bitte setzen Sie einen Basispfad " +
-              "in der Plugin-Config (z.\u202fB. einen Unterordner der " +
-              "Freigabe) — dann funktioniert der File-Manager vollständig."
+            ? "Verbindung + Anmeldung erfolgreich, aber der Share-Root konnte " +
+              "nicht aufgelistet werden (stat OK, readdir schlug fehl). Das ist " +
+              "ein unerwarteter Zustand \u2014 seit v0.4.13 sollte readdir gegen " +
+              "Samba fehlerfrei laufen. Bitte tools/diag-wire.js ausf\u00fchren " +
+              "und den Report melden."
+            : baseNotEnum
+            ? "Verbindung + Anmeldung erfolgreich, Basispfad \u201e" +
+              (listing._basePathForDisplay || testCfg.base_path || "") +
+              "\u201c wurde vom Server best\u00e4tigt (stat OK), das direkte " +
+              "Auflisten schlug aber fehl. Das ist ein unerwarteter Zustand \u2014 " +
+              "seit v0.4.13 sollte readdir gegen Samba fehlerfrei laufen. Bitte " +
+              "tools/diag-wire.js ausf\u00fchren und den Report melden."
             : undefined,
         });
       } catch (err) {
@@ -1017,7 +1039,19 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
         const code = (err && (err.code || err.errno)) || null;
         let hint = null;
         const m = msg.toLowerCase();
-        if (code === "ECONNREFUSED" || m.includes("econnrefused"))
+        // If the wrapper already produced a well-formed, self-explanatory
+        // error (own `code` set), skip the substring-match hint table —
+        // it would otherwise trigger on words that appear inside our own
+        // human-readable German explanation text (e.g. our message text
+        // mentions "access_denied" or "path" for teaching purposes).
+        const codesWithOwnMessage = new Set([
+          "BASE_PATH_NOT_FOUND",
+          "BASE_PATH_NOT_A_DIR",
+        ]);
+        if (code && codesWithOwnMessage.has(code)) {
+          hint = null;
+        }
+        else if (code === "ECONNREFUSED" || m.includes("econnrefused"))
           hint = "The server refused the connection on port " + testCfg.port +
             ". Check that Samba is running and that a firewall (or Docker) does not block TCP/445.";
         else if (code === "ETIMEDOUT" || m.includes("etimedout") || m.includes("timed out"))

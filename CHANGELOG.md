@@ -4,6 +4,386 @@ All notable changes to `saltcorn-samba` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.14] – 2026-07-06
+
+### Changed – Code-Review / Aufräumen (keine Verhaltensänderung)
+
+Interne QS-Runde nach dem v0.4.13-Fix. Der Bug war behoben, aber die
+Kommentare, Fehlertexte und die Fallback-Logik im Connection-Test
+verwiesen noch auf die alte, mittlerweile widerlegte Hypothese
+(`FileInformationClass=37 hart kodiert`). Alle diese Stellen wurden
+auf den tatsächlichen Root Cause aktualisiert bzw. gelöscht.
+
+**readdir-compat.js:**
+- Docstring priorisiert den tatsächlichen Hauptbug (leeres Pattern
+  auf Folge-Pages) und schiebt den FileNameOffset-Bug in die Sekundär-
+  rolle (defensiv abgefangen, wird bei aktueller Loop nie getriggert).
+- Encoder-Docstring erklärt, dass der `pat.length === 0`-Zweig nur
+  noch defensive Sicherheit ist.
+
+**smb-client.js:**
+- Der lange, spekulative Kommentar-Block über „Some Samba builds
+  reject QUERY_DIRECTORY on the share root because FileInformation-
+  Class=37 is hardcoded“ wurde entfernt. Der wahre Grund steht jetzt
+  kurz und präzise dort.
+- Die 0xC0000033-Fehlermeldung verweist nicht mehr auf v0.4.12 als Fix
+  und nicht mehr auf `tools/diag-basepath.js`, sondern auf
+  `tools/diag-wire.js` (das aussagekräftigere Tool).
+
+**index.js (Connection-Test-Route):**
+- Der „gelber Hinweis“-Fallback bleibt als Safety Net, wird aber nur
+  noch aktiv, wenn `readdir` fehlschlägt und `stat` erfolgreich ist —
+  ein Zustand, der seit v0.4.13 nicht mehr auftreten sollte.
+- Der Hinweistext sagt jetzt „unerwarteter Zustand, bitte diag-wire.js
+  ausführen“ statt der alten, jetzt falschen Erklärung mit
+  `FileInformationClass=37`.
+
+**tools/diag-basepath.js:**
+- FIX: `client.disconnect()` → `client.close()`. smb3-client's Client
+  hat `close()`, nicht `disconnect()` (das war die marsaud-API). Der
+  Aufruf schlug bisher am Ende jedes Diagnostic-Runs mit einer
+  TypeError-Meldung fehl, ohne aber das Resultat zu beeinträchtigen.
+
+**tools/diag-wire.js:**
+- FIX: Zusätzlich zu `open.close()` wird jetzt auch `client.close()`
+  aufgerufen, damit der TCP-Socket sauber geschlossen wird.
+
+## [0.4.13] – 2026-07-06
+
+### Fixed – **QUERY_DIRECTORY leere Patterns → 0xC0000033 (die eigentliche Ursache)**
+
+Mit v0.4.12 wurde ein Wire-Bug in smb3-client (FileNameOffset) gefixt,
+aber Samba lehnte weiterhin ab. Mit dem neuen `tools/diag-wire.js` konnte
+die tatsächliche Ursache byteweise verifiziert werden:
+
+**Bug:** smb3-client's `readdirAll` sendet ab der 2. Enumeration-Seite
+`searchPattern=""` (leerer String). Windows toleriert das, aber Samba's
+`source3/smbd/smb2_query_directory.c` enthält den strikten Check:
+
+```c
+if (state->in_file_name[0] == '\0') {
+    tevent_req_nterror(req, NT_STATUS_OBJECT_NAME_INVALID);
+    return tevent_req_post(req, ev);
+}
+```
+
+Das ergibt exakt den STATUS_OBJECT_NAME_INVALID (0xC0000033), den wir
+seit v0.4.0 sehen.
+
+**Fix in `readdir-compat.js`:** Der eigene Enumeration-Loop sendet auf
+**jeder** Seite `searchPattern="*"`, nicht nur beim ersten Request.
+`RESTART_SCANS` wird nur beim ersten Request gesetzt; ab dann sendet
+Samba nach dem letzten Batch korrekt STATUS_NO_MORE_FILES, was den Loop
+sauber terminiert. Verifiziert via `diag-wire.js`:
+
+- Probe 1 (pat=`*`, RESTART): STATUS_SUCCESS, 8 Einträge
+- Probe 2 (pat=`*`, ohne RESTART): STATUS_NO_MORE_FILES → Loop-Ende
+- Probe 6 (pat=`""`, offset=0): **0xC0000033** ← der Bug
+
+### Added
+
+- `tools/diag-wire.js` – Wire-Level-Diagnose mit Hex-Dump der SMB2-Bytes,
+  testet 6 verschiedene QUERY_DIRECTORY-Varianten (Info-Class, Buffer-
+  Größe, mit/ohne Pattern). Nützlich für zukünftige Kompatibilitäts-
+  probleme mit anderen SMB-Servern.
+
+### Upstream-Report aktualisiert
+
+`smb3-client-bug-report.md` beschreibt jetzt beide Bugs (FileNameOffset
+**und** leeres Pattern gegen Samba). Beide Fixes sind identisch simpel:
+auf jeder Page `*` senden.
+
+## [0.4.12] – 2026-07-06
+
+### Fixed – **`0xC0000033` beim readdir gegen Samba 4.23 endgültig behoben (Root Cause identifiziert)**
+
+Nach ausführlicher Wire-Level-Analyse (siehe `smb-diag-report.txt`
+aus 0.4.11) ist die eigentliche Ursache identifiziert:
+
+**Bug in `smb3-client@0.2.0`, Datei `dist/wire/structs/queryDirectory.js`:**
+Der Encoder für SMB2 QUERY_DIRECTORY setzt das `FileNameOffset`-Feld
+immer hart auf 96, auch wenn `FileNameLength = 0` gesendet wird
+(z. B. auf der 2. und folgenden Enumeration-Seite).
+[MS-SMB2 §2.2.33](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/10906442-294c-46d3-8515-c277efe1f752)
+verlangt für diesen Fall **`FileNameOffset = 0`**.
+Windows Server toleriert die Fehlbelegung, Samba 4.23 lehnt sie
+strikt mit `STATUS_OBJECT_NAME_INVALID` (`0xC0000033`) ab —
+deshalb funktioniert nichts, was das Listing über mehrere Pages
+braucht, wovon `smb3-client` grundsätzlich ausgeht.
+
+### Fix
+
+Die frühere `readdir-compat.js` (die 3 FileInformationClass-Werte
+durchprobierte) ist ersetzt durch einen echten **Wire-Format-Patch**:
+
+- Eigener spec-konformer `encodeQueryDirectoryRequest`-Encoder in
+  `readdir-compat.js`
+- Eigene QUERY_DIRECTORY-Loop, die den gepatchten Encoder verwendet
+- Wiederverwendung von `Open.withOpen` aus `smb3-client` (Open, Close,
+  Tree-Connect bleiben unverändert) via dynamischem ESM-Import über
+  `file://` URLs (das `exports`-Gate von `smb3-client` sperrt sonst
+  jeden Subpath-Import)
+- `smb-client.js` nutzt jetzt ausschließlich `readdirCompat` als
+  readdir-Pfad. Kein Fallback mehr auf das kaputte `client.readdir()`.
+- Bonus: Die Rich-Dirents aus dem gepatchten QUERY_DIRECTORY liefern
+  Name, Größe, mtime und ctime in einem Roundtrip. Der bisherige
+  Fan-out mit einem `stat()`-Aufruf pro Eintrag entfällt — große
+  Verzeichnisse werden dadurch **deutlich schneller**.
+
+### Bekannt – Upstream-Fix eingereicht
+
+Parallel wurde ein Bug-Report an `smb3-client` (GitHub:
+`euricojardim/smb3-client`) vorbereitet inklusive Reproduktions-
+Diagnose und Patch-Vorschlag. Sobald der Upstream-Fix in einer
+neuen `smb3-client`-Version verfügbar ist, kann dieses Plugin die
+`readdir-compat.js` wieder entfernen und die eingebaute API direkt
+nutzen.
+
+### Migration – keine Konfigurationsänderung nötig
+
+Der Fix greift automatisch. Der gelbe Hinweis „Basispfad bestätigt,
+aber Auflisten funktioniert nicht“ aus 0.4.9–0.4.11 fällt weg, weil
+das Auflisten jetzt tatsächlich funktioniert. Der File-Manager
+zeigt Ordner-Inhalte, die Baum-Ansicht rendert Verzeichnis-Bäume,
+PDF-Ansicht und Datei-Downloads funktionieren unverändert.
+
+---
+
+## [0.4.11] – 2026-07-06
+
+### Changed – **Ehrliche Fehlerpropagation statt stiller Fallback**
+
+In 0.4.10 wurde der neue `readdir-compat.js`-Wrapper eingeführt, der
+vor dem eigentlichen `QUERY_DIRECTORY` die FileInformationClass
+automatisch von 37 → 3 → 1 durchprobiert. Zwei Probleme kamen dabei
+zum Vorschein:
+
+1. **Alle drei Info-Klassen lieferten weiterhin `0xC0000033`** auf
+   dem betroffenen Server. Das Umschalten der Info-Klasse ist also
+   *nicht* die eigentliche Ursache — die Annahme aus 0.4.10 war falsch.
+2. **Der Wrapper in `smb-client.js` fiel bei totalem Compat-Fehler
+   still auf das kaputte `client.readdir()` zurück**, das exakt
+   dieselbe (kaputte) FileInformationClass 37 verwendet. Dadurch
+   wurde die 0.4.10-Diagnostik komplett verschluckt und das Symptom
+   sah unverändert aus wie vor 0.4.10.
+
+**Fixes in 0.4.11:**
+
+- `smb-client.js` erkennt jetzt den 0xC0000033-Erschöpfungsfehler aus
+  dem Compat-Modul (Muster `"all classes exhausted"`) und propagiert
+  ihn direkt — kein stiller Retry mehr über das kaputte
+  `client.readdir()`.
+- `readdir-compat.js` wirft bei Ausschöpfung aller drei Klassen einen
+  synthetischen Fehler mit klarem Wortlaut:
+  `"QUERY_DIRECTORY failed: 0xC0000033 (all classes exhausted; no
+  working FileInformationClass on this server). Tried:
+  FileIdBothDirectoryInformation=37, FileBothDirectoryInformation=3,
+  FileDirectoryInformation=1."`
+  Der Fehler trägt zusätzlich ein `.attempts`-Array mit den
+  NT-Statuscodes pro Klasse für spätere Diagnose.
+
+### Was das für dich bedeutet
+
+Der gelbe Hinweis und `QUERY_DIRECTORY failed: 0xC0000033` sind
+**noch nicht behoben** — 0.4.11 macht den Fehler nur ehrlich sichtbar,
+sodass wir aus dem nächsten Diagnoselauf echte Signale bekommen.
+
+**Nächster Schritt — bitte auf dem Saltcorn-Server ausführen** (im
+entpackten Plugin-Verzeichnis, oder direkt aus dem ZIP):
+
+```bash
+cd /pfad/zu/saltcorn-samba
+node tools/diag-basepath.js \
+  --host 192.168.110.10 \
+  --share buero \
+  --path static \
+  --user 01_vassen \
+  --domain buero.ib-vassen.de \
+  --password 'DEIN_PASSWORT'
+```
+
+Das Skript führt 6 Sonden mit rohen NT-Statuscodes aus (TREE_CONNECT,
+CREATE, QUERY_DIRECTORY mit allen drei Info-Klassen, `stat`-Probe).
+Die Ausgabe zeigt, an welcher Stelle Samba den Fehler wirft und mit
+welchem Statuscode. Damit können wir 0.4.12 gezielt schreiben statt
+weiter zu raten.
+
+Ein heißer Kandidat für 0.4.12 (Wire-Format-Bug in `smb3-client`):
+`encodeQueryDirectoryRequest` setzt `FileNameOffset` immer auf 96,
+auch wenn kein Suchmuster gesendet wird — laut
+[MS-SMB2 §2.2.33](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/10906442-294c-46d3-8515-c277efe1f752)
+MUSS das Feld dann 0 sein. Bestätigung dafür aber bitte erst nach
+der Diagnose.
+
+---
+
+## [0.4.10] – 2026-07-05
+
+### Fixed – **`0xC0000033` beim tatsächlichen Auflisten (Tree-View, File-Manager) endgültig behoben**
+
+Ab 0.4.9 zeigte der Verbindungstest zwar den grünen Erfolgsstatus mit
+gelbem Hinweis, aber im normalen Betrieb (Tree-View, File-Manager,
+Datei-Listen) knallte die Anwendung mit `Samba: QUERY_DIRECTORY failed:
+0xC0000033` — der `stat`-Fallback verhinderte das nur beim Test, nicht
+bei echten Aufrufen.
+
+**Ursache:** `smb3-client@0.2.0` sendet in
+[`open/readdir.js`](https://github.com/euricojardim/smb3-client) hart
+kodiert `FileInformationClass = 37`
+(`FileIdBothDirectoryInformation`). Samba 4.23 lehnt diese
+Info-Klasse für bestimmte Verzeichnisse mit
+`STATUS_OBJECT_NAME_INVALID` (`0xC0000033`) ab. `smbclient` und
+Windows-Explorer benutzen `FileBothDirectoryInformation (3)` bzw.
+`FileDirectoryInformation (1)` — die Samba zuverlässig akzeptiert.
+
+**Fix:** Neues Modul `readdir-compat.js`. Es macht Folgendes:
+
+1. Für jeden `readdir`-Aufruf wird die Directory zuerst per
+   `CREATE`+`DIRECTORY_FILE` geöffnet (wie bei smb3-client selbst).
+2. Dann sendet der Wrapper `QUERY_DIRECTORY` in dieser Reihenfolge:
+   `FileIdBothDirectoryInformation (37)` →
+   `FileBothDirectoryInformation (3)` →
+   `FileDirectoryInformation (1)`. Sobald eine Klasse Erfolg meldet,
+   wird sie pro Client-Instanz gemerkt (`WeakMap`), damit
+   Folgeaufrufe nicht dreimal probieren.
+3. `0xC0000033` und `STATUS_INVALID_INFO_CLASS` lösen den nächsten
+   Versuch aus; jeder andere Fehler (fehlender Pfad, Zugriff
+   verweigert, Netzwerk) bricht sofort ab und wird an die bestehende
+   deutsche Fehlerbehandlung weitergereicht.
+4. Die Rückgabe enthält Größe/`mtime`/`ctime` direkt aus dem
+   `QUERY_DIRECTORY`-Response — dadurch entfällt der bisherige
+   Per-Entry-`stat`-Fan-Out, was Directory-Listings spürbar
+   beschleunigt.
+5. Bei `readdir` bleibt `client.readdir()` als klassischer Fallback
+   erhalten, wenn `readdir-compat` an einem *anderen* Fehler scheitert
+   — dann greifen die bereits vorhandenen Rewrites
+   („Pfad existiert nicht", Groß-/Kleinschreibungs-Probes).
+
+**Warum das überhaupt geht:** `smb3-client` publiziert nur seinen
+`Client`-Konstruktor über die `exports`-Map. Die internen Wire-
+Encoder/Decoder liegen aber als reguläre `.js`-Dateien in
+`dist/`. Der Wrapper importiert sie über `file://`-URLs direkt vom
+Filesystem (also `node_modules/smb3-client/dist/wire/structs/...`),
+was den `exports`-Gate umgeht. Das ist stabil, solange die
+dist-Layout-Konventionen der 0.2.x-Reihe von `smb3-client` erhalten
+bleiben.
+
+## [0.4.9] – 2026-07-05
+
+### Fixed – **`0xC0000033` beim Auflisten des Basispfads (smb3-client-vs-Samba-4.23-Bug jetzt auch für Basispfade abgefangen)**
+
+Auch in 0.4.8 lief der Verbindungstest mit gesetztem Basispfad in
+`QUERY_DIRECTORY failed: 0xC0000033` (`OBJECT_NAME_INVALID`). Ohne
+Basispfad war die Verbindung korrekt und zeigte den gelben Hinweis.
+
+**Ursache:** `smb3-client` sendet `QUERY_DIRECTORY` mit hart kodiertem
+`FileInformationClass = 37` (`FileIdBothDirectoryInformation`). Samba
+4.23 lehnt das für bestimmte Verzeichnisse ab — auch dann, wenn der
+Ordner existiert, geöffnet und `stat`-bar ist. Genau derselbe Bug, der
+bisher nur beim Auflisten des Share-Roots als ‚Root nicht auflistbar'
+aufgefangen wurde, kann auch den konfigurierten Basispfad selbst
+treffen.
+
+**Fix:** Der Fallback greift jetzt auch für Basispfade. Wenn
+`client.readdir("")` mit `0xC0000033` scheitert, versucht die Test-Route
+zusätzlich `client.stat("")` auf denselben Pfad:
+
+- **stat OK** → Verbindung + Basispfad bestätigt, gelber Hinweis mit
+  Erklärung des bekannten Bugs und Workaround-Vorschlägen.
+- **stat schlägt auch fehl** → normaler Fehlerpfad (Basispfad-
+  Diagnose mit Schreibvarianten-Probes) läuft weiter wie bisher.
+
+Damit lassen sich Basispfade eintragen, auf die `readdir` per
+`FileIdBothDirectoryInformation` scheitert — der Download und die
+Unterordner-Ansicht funktionieren über die normalen SMB-Calls
+trotzdem.
+
+## [0.4.8] – 2026-07-05
+
+### Fixed – **Basispfad wurde beim Verbindungstest doppelt vorangestellt (die eigentliche Ursache)**
+
+In allen Vorgängerversionen (0.4.4 – 0.4.7) hat der Verbindungstest den
+konfigurierten Basispfad **zweimal** auf den Server geschickt und deshalb
+systematisch die Meldung *„Der Basispfad ist auf dem Server nicht auffindbar"*
+produziert — auch dann, wenn der Pfad in Wirklichkeit existierte und mit
+`smbclient` oder dem Windows-Explorer problemlos erreichbar war.
+
+**Ursache:** `buildClient(config)` speichert `config.base_path` intern als
+`client.basePath`. Der Wrapper-`resolvePath(rel)` baut daraus
+`<share>/<basePath>/<rel>`. Die Test-Route rief aber
+`client.readdir(testCfg.base_path)` auf und übergab den Basispfad **noch
+einmal** als relatives Argument. Ergebnis: aus `base_path = "static"` wurde
+auf der Leitung `buero/static/static` — den es natürlich nicht gibt. Die
+Diagnose-Ausgabe (`tested_path: static/static`) zeigte den Bug bereits
+klar an, wurde aber bisher als Symptom statt Ursache gelesen.
+
+**Fix:** Die Test-Route ruft jetzt `client.readdir("")` auf. Der Wrapper
+resolvet das intern korrekt zu `<share>/<basePath>` — also genau dem Pfad,
+den der Benutzer im Formular eingetragen hat. Für Anzeige-Zwecke (Meldungen,
+Diagnose-Kacheln, Fallback-Probes) wird der Basispfad separat in
+`baseForDisplay` gehalten.
+
+### Added – **Standalone-Diagnose-Skript `tools/diag-basepath.js`**
+
+Wer den Verbindungsproblemen auf den Grund gehen will, kann jetzt außerhalb
+von Saltcorn probieren, was smb3-client tatsächlich sieht:
+
+```bash
+node tools/diag-basepath.js \
+  --host 192.168.110.10 --share buero --path static \
+  --user 01_vassen --domain buero.ib-vassen.de --password ...
+```
+
+Das Skript führt sechs Probes durch (Share-Root, Share-Root mit Slash,
+`stat` auf Ziel, `readdir` auf Ziel, Groß-/Kleinschreibvariante) und
+druckt für jede den NT-Status-Code — hilfreich beim Aufspüren von
+Schreibvarianten oder ACL-Problemen.
+
+## [0.4.7] – 2026-07-05
+
+### Fixed – **Irreführende Windows-UNC-Anzeige in der Fehlermeldung**
+
+Die v0.4.6-Fehlermeldung zeigte den getesteten Pfad als Windows-UNC
+(`\\\\192.168.110.10\\buero\\static`). Das war irreführend, weil das
+Plugin an smb3-client tatsächlich Forward-Slash-Pfade schickt
+(`buero/static`) — die Backslash-Anzeige suggerierte einen Bug, der
+keiner ist. Jetzt wird der Pfad in genau der Form gezeigt, die auch
+tatsächlich über die Leitung geht: `<share>/<basispfad>`.
+
+## [0.4.6] – 2026-07-05
+
+### Fixed – **Schreibvarianten-Test verdoppelte den Basispfad**
+
+Die Case-Probes in v0.4.4/0.4.5 riefen `client.readdir(<candidate>)` auf.
+Der Wrapper prependiert aber automatisch den bereits konfigurierten
+`basePath` — dadurch wurde intern nach `buero/static/static` statt
+`buero/static` gesucht. Alle Probes scheiterten deshalb systematisch
+mit derselben Meldung, unabhängig von der wahren Ursache.
+
+**Fix:** Die Probes gehen jetzt direkt gegen den rohen `smb3-client`
+(`client._raw.readdir(share/<absoluter Pfad>)`) und bauen die
+From-Share-Root-Pfade selbst zusammen. Der Test-Endpunkt zeigt jetzt
+zusätzlich pro Probe den tatsächlich getesteten Pfad an.
+
+### Fixed – **Falscher „Login rejected“-Hinweis bei BASE_PATH_NOT_FOUND**
+
+Der Fallback-Hint-Table prüfte per Substring-Match auf `access_denied`
+u.\u00e4. — das triggerte auf den erklärenden Text in unserer eigenen
+deutschen Fehlermeldung (wir *erwähnen* `ACCESS_DENIED` didaktisch).
+Ein ungefundener Basispfad wurde deshalb zusätzlich mit dem irreführenden
+Hinweis „Login rejected“ versehen.
+
+**Fix:** Fehler mit eigenem `code` (`BASE_PATH_NOT_FOUND`,
+`BASE_PATH_NOT_A_DIR`) überspringen den Substring-Match — die
+Wrapper-Meldung ist bereits vollständig und braucht keinen „Hint“.
+
+### Changed – **Bessere Basispfad-Meldung**
+
+Wenn kein Case-Match gefunden wurde, zeigt die Meldung jetzt den
+tatsächlich getesteten UNC-Pfad (`\\\\server\\share\\pfad`) und weist
+explizit darauf hin, dass der Basispfad **relativ zur Freigabe** ist —
+also `unterordner` und **nicht** `sharename/unterordner`.
+
 ## [0.4.5] – 2026-07-05
 
 ### Fixed – **Test-Verbindung-Button reagiert nicht mehr (v0.4.4-Regression)**

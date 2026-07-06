@@ -29,6 +29,7 @@
  */
 
 const path = require("path");
+const { readdirCompat } = require("./readdir-compat");
 
 // ---------------------------------------------------------------------------
 // Dynamic ESM import cache for smb3-client
@@ -223,38 +224,19 @@ async function buildClient(config) {
   }
 
   /**
-   * Convert a smb3-client Dirent + best-effort stat into the shape the
-   * rest of the plugin expects (`name`, `isDirectory` as function OR
-   * boolean, `size`, `mtime`, `birthtime`).
-   *
-   * We fetch stat data in parallel because smb3-client's readdir Dirent
-   * only carries name/isFile/isDirectory. For very large directories this
-   * would fan out into many stat calls — that's an acceptable trade-off
-   * for now; a future release can optimise by using SMB2_QUERY_DIRECTORY's
-   * FileBothDirectoryInformation output directly.
+   * Convert a readdirCompat rich-Dirent (which already carries name,
+   * size, mtime, ctime, and isDirectory()) directly to the legacy
+   * `@marsaud/smb2`-compatible shape the rest of the plugin expects.
+   * No extra stat roundtrip needed — attributes come straight from the
+   * single QUERY_DIRECTORY response.
    */
-  async function enrichEntry(dirent, parentFullPath) {
-    const isDir = !!dirent.isDirectory();
-    const fullPath = parentFullPath
-      ? parentFullPath + "/" + dirent.name
-      : dirent.name;
-    let size = 0;
-    let mtime;
-    let birthtime;
-    try {
-      const st = await client.stat(fullPath);
-      size = Number(st.size || 0);
-      mtime = st.mtime;
-      birthtime = st.ctime;
-    } catch (_) {
-      // Non-fatal; return whatever we already have.
-    }
+  function mapDirent(dirent) {
     return {
       name: dirent.name,
-      isDirectory: isDir,
-      size,
-      mtime,
-      birthtime,
+      isDirectory: !!(dirent.isDirectory && dirent.isDirectory()),
+      size: Number(dirent.size || 0),
+      mtime: dirent.mtime,
+      birthtime: dirent.ctime,
     };
   }
 
@@ -273,33 +255,34 @@ async function buildClient(config) {
      */
     async readdir(rel) {
       const full = resolvePath(rel);
+      // readdirCompat ist der ALLEINIGE readdir-Pfad. Grund: smb3-
+      // client@0.2.0 hat zwei QUERY_DIRECTORY-Wire-Bugs, die gegen
+      // Samba 4.23 zu STATUS_OBJECT_NAME_INVALID (0xC0000033) führen
+      // (leeres Pattern auf Folge-Pages + falscher FileNameOffset).
+      // readdirCompat implementiert QUERY_DIRECTORY MS-SMB2-§2.2.33-
+      // konform und umgeht beide Bugs. Kein Fallback auf
+      // client.readdir() — das würde die Bugs reproduzieren.
       let dirents;
       try {
-        dirents = await client.readdir(full, { withFileTypes: true });
-      } catch (err) {
-        // Some Samba builds (observed on 4.20+/4.23+) reject
-        // SMB2 QUERY_DIRECTORY on the *share root* with
-        // STATUS_OBJECT_NAME_INVALID (0xC0000033) because smb3-client
-        // asks for FileIdBothDirectoryInformation (class 37) on a
-        // handle opened with an empty filename. We cannot swap the
-        // information class from userland, and Samba refuses both
-        // "." (→ STATUS_OBJECT_NAME_NOT_FOUND) and "*" (→ CREATE with
-        // wildcard is protocol-illegal). The clean way out is:
-        // require the caller to configure a real base_path so every
-        // readdir happens inside a directory the server can enumerate.
+        dirents = await readdirCompat(client, full, { rich: true });
+      } catch (errCompat) {
+        const err = errCompat;
         const msg = String((err && err.message) || err || "");
-        const isRoot = !rel && !basePath;
-        const isRootEnumBug =
-          /0xC0000033|OBJECT_NAME_INVALID|QUERY_DIRECTORY/i.test(msg);
-        if (isRoot && isRootEnumBug) {
+        // Falls der Compat-Pfad selbst mit 0xC0000033 zurückkommt,
+        // liegt entweder ein weiterer, unbekannter Wire-Bug vor oder
+        // Samba lehnt aus einem anderen Grund ab (z. B. fehlende
+        // Rechte auf die Zielressource). Wir geben eine gezielte
+        // Meldung mit Handlungsanweisung.
+        if (/0xC0000033|OBJECT_NAME_INVALID/i.test(msg)) {
           const e = new Error(
-            "Das Share-Root lässt sich auf diesem Samba-Server nicht " +
-            "direkt auflisten (" + (msg || "QUERY_DIRECTORY failed") + "). " +
-            "Bitte in der Plugin-Config einen Basispfad setzen (z.\u202fB. " +
-            "einen Unterordner der Freigabe wie „daten“ oder „projekte“) — " +
-            "dann funktionieren alle Directory-Listings innerhalb dieses " +
-            "Unterordners. Details siehe README, Abschnitt „Troubleshooting → " +
-            "QUERY_DIRECTORY auf Share-Root“."
+            "Samba lehnt QUERY_DIRECTORY auf diesem Pfad unerwartet ab " +
+              "(STATUS_OBJECT_NAME_INVALID, 0xC0000033). Die bekannten " +
+              "smb3-client-Wire-Bugs sind in dieser Plugin-Version " +
+              "bereits gepatcht — falls dieser Fehler dennoch auftritt, " +
+              "liegt ein bislang unbekannter Wire-Format-Fehler oder ein " +
+              "Rechteproblem vor. Bitte tools/diag-wire.js ausführen " +
+              "und den Report zurücksenden. Details: " +
+              msg
           );
           e.cause = err;
           throw e;
@@ -328,18 +311,10 @@ async function buildClient(config) {
         }
         throw err;
       }
-      // Parallel enrichment. Bounded to a reasonable concurrency to avoid
-      // saturating the SMB session on huge directories.
-      const CHUNK = 16;
-      const result = [];
-      for (let i = 0; i < dirents.length; i += CHUNK) {
-        const slice = dirents.slice(i, i + CHUNK);
-        const enriched = await Promise.all(
-          slice.map((d) => enrichEntry(d, full))
-        );
-        result.push(...enriched);
-      }
-      return result;
+      // readdirCompat gibt Rich-Dirents zurück (Name, Größe, mtime,
+      // ctime, isDirectory). Kein zusätzlicher stat-Fan-out nötig —
+      // ein einziger QUERY_DIRECTORY-Roundtrip liefert alles.
+      return dirents.map(mapDirent);
     },
 
     /** Stat a single file/directory (name-relative-to-share/basePath). */
