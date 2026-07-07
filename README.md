@@ -194,15 +194,20 @@ Optionen:
 
 | Option | Zweck |
 |---|---|
-| **Root directory mode** | `static` = immer Base-Path aus Plugin-Config, `from_field` = Sub-Pfad kommt aus einem DB-Feld der aktuellen Zeile |
-| **Row field with sub-path** | Feld der Tabelle mit dem relativen Ordnernamen (bei `from_field`) |
-| **Extra sub-path** | statischer Suffix (z. B. `invoices`) |
+| **View-Basispfad (relativ zum Plugin-Basispfad)** | Optionaler statischer Präfix nur für diese View. Beispiel: Plugin-Basispfad = `static`, View-Basispfad = `projekte/2026` → View listet `static/projekte/2026`. Zweistufige Konfiguration: einmal serverweit im Plugin, einmal pro View. |
+| **Row-Modus** | `static` = nur der View-Basispfad zählt, `from_field` = zusätzlich wird ein DB-Feldwert der aktuellen Zeile angehängt (z. B. in einer Show-View) |
+| **Feld mit Unterpfad** | Feld der Tabelle mit dem relativen Ordnernamen (nur bei `from_field`) |
+| **Zusätzlicher Suffix (nach dem Feldwert)** | statischer Suffix, z. B. `invoices` (nur bei `from_field`) |
 | **Show hidden files** | `.dotfiles` einblenden |
 | **Allow navigating up** | Up-Button aktivieren (nur bis zum Root, kein Ausbruch) |
 | **Open PDFs / images inline** | Klick öffnet die Datei im integrierten Viewer |
 | **Show "Open in file manager" button** | `smb://`-Link pro Zeile |
 | **Page size** | Einträge pro Seite (0 = alle) |
 | **Panel title** | Text im Karten-Header |
+
+Der effektive Pfad wird zusammengesetzt aus (jeweils falls gesetzt):
+`Plugin-Basispfad / View-Basispfad / Feldwert / Zusätzlicher Suffix`.
+`..`-Traversal, absolute Pfade und UNC-Präfixe werden abgelehnt.
 
 Beispiel-Datenmodell für kunden-spezifische Ordner:
 
@@ -212,12 +217,13 @@ Felder:   name (String), akte_dir (String, z. B. "kunde_42/2026")
 ```
 
 Dann eine Show-View von `kunden` bauen und die `SambaFileManager`-View mit
-Mode = `from_field`, Row field = `akte_dir` einbetten.
+Row-Modus = `from_field`, Feld = `akte_dir` einbetten.
 
 ### View: `SambaTree`
 
 Kompaktere Alternative – lazy-loading Baum, ideal in einer Sidebar oder
-neben Formularen. Gleiche Path-Modi wie beim File-Manager.
+neben Formularen. Gleiche Path-Optionen wie beim File-Manager (inkl.
+**View-Basispfad**, **Row-Modus**, **Feld**, **Zusätzlicher Suffix**).
 
 ### Fieldview `samba_pdf` (deaktiviert seit 0.3.2)
 

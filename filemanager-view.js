@@ -45,30 +45,41 @@ const configuration_workflow = () =>
           return new Form({
             fields: [
               new Field({
+                name: "view_base_path",
+                label: "View-Basispfad (relativ zum Plugin-Basispfad)",
+                type: "String",
+                sublabel:
+                  "Optional. Statischer Pfad relativ zum Plugin-Basispfad, der f\u00fcr diese View gilt. " +
+                  "Beispiel: Plugin-Basispfad = 'static', View-Basispfad = 'projekte/2026' \u2192 View listet 'static/projekte/2026'. " +
+                  "Keine f\u00fchrenden/abschlie\u00dfenden Slashes n\u00f6tig. Traversal (\u201e..\u201c) wird abgelehnt.",
+              }),
+              new Field({
                 name: "mode",
-                label: "Root directory mode",
+                label: "Row-Modus",
                 type: "String",
                 required: true,
                 attributes: {
                   options: ["static", "from_field"],
                 },
                 sublabel:
-                  "static = always the plugin base_path. from_field = append a row field value to base_path (only when the view is embedded in a Show view).",
+                  "static = immer nur der View-Basispfad. from_field = h\u00e4nge einen Feldwert der aktuellen Zeile an " +
+                  "(nur sinnvoll, wenn die View in einer Show-View eingebettet ist).",
                 default: "static",
               }),
               new Field({
                 name: "path_field",
-                label: "Row field with sub-path",
+                label: "Feld mit Unterpfad",
                 type: "String",
                 attributes: { options: stringFieldOptions },
                 showIf: { mode: "from_field" },
               }),
               new Field({
                 name: "extra_subpath",
-                label: "Extra sub-path (appended)",
+                label: "Zus\u00e4tzlicher Suffix (nach dem Feldwert)",
                 type: "String",
                 sublabel:
-                  "Optional. Static suffix appended after the field value. Example: 'invoices'",
+                  "Optional. Statischer Suffix, der nach dem Feldwert angeh\u00e4ngt wird. Beispiel: 'invoices'.",
+                showIf: { mode: "from_field" },
               }),
               new Field({
                 name: "show_hidden",
@@ -122,14 +133,37 @@ async function get_state_fields() {
   return [];
 }
 
+/**
+ * Compose the start path (relative to the plugin base_path) from three
+ * optional parts:
+ *   1. `view_base_path`  — static, per-view prefix
+ *   2. row field value    — only in "from_field" mode
+ *   3. `extra_subpath`   — static suffix, only in "from_field" mode
+ *
+ * Empty parts are dropped. The final joined path is passed through
+ * sanitizeRelativePath so traversal / absolute paths / backslashes are
+ * rejected consistently.
+ */
 function computeStartPath(configuration, row) {
   const parts = [];
+  if (configuration.view_base_path) {
+    parts.push(String(configuration.view_base_path));
+  }
   if (configuration.mode === "from_field" && configuration.path_field && row) {
     const v = row[configuration.path_field];
     if (v) parts.push(String(v));
   }
-  if (configuration.extra_subpath) parts.push(String(configuration.extra_subpath));
-  return sanitizeRelativePath(parts.join("/"));
+  if (
+    configuration.mode === "from_field" &&
+    configuration.extra_subpath
+  ) {
+    parts.push(String(configuration.extra_subpath));
+  }
+  const joined = parts
+    .map((p) => p.replace(/^\/+|\/+$/g, ""))
+    .filter(Boolean)
+    .join("/");
+  return sanitizeRelativePath(joined);
 }
 
 // ---------------------------------------------------------------------------

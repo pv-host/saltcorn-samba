@@ -4,6 +4,57 @@ All notable changes to `saltcorn-samba` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.15] – 2026-07-07
+
+### Fixed – CSRF-Fehlermeldung bei Upload / Ordner anlegen / Rename / Delete
+
+Bei jedem schreibenden Klick in der File-Manager-View („Ordner anlegen“,
+„Datei hochladen“, „umbenennen“, „löschen“) erschien der Fehler
+`Invalid CSRF token`, obwohl der Client den Token korrekt im Header
+`X-CSRF-Token` mitgeschickt hat.
+
+**Root Cause:** Saltcorns globaler `csurf`-Middleware validiert bereits
+alle POST-Routen der Plugins gegen das Session-Secret. Unser Plugin hatte
+zusätzlich eine manuelle `checkCsrf(req)`-Funktion, die den vom Client
+geschickten Token mit `req.csrfToken()` verglich. `req.csrfToken()` gibt
+aber bei jedem Aufruf einen **frisch gesalzenen** Token zurück – der
+Stringvergleich `provided !== req.csrfToken()` schlug daher immer fehl,
+auch bei völlig gültigen Requests.
+
+**Fix:** `checkCsrf` ist jetzt ein dokumentierter No-Op. Die eigentliche
+CSRF-Prüfung übernimmt weiterhin Saltcorns Middleware (kein Sicherheits-
+abbau). Betroffene Write-Routen (Upload, Mkdir, Rename, Delete) in
+`index.js` sind unverändert und funktionieren jetzt korrekt.
+
+### Added – View-Basispfad (`view_base_path`) für File-Manager und Tree
+
+Beide Views (SambaFileManager und SambaTree) haben ein neues optionales
+Konfigurationsfeld **„View-Basispfad (relativ zum Plugin-Basispfad)“**.
+Damit lässt sich der Pfad zweistufig konfigurieren:
+
+1. **Plugin-Basispfad** (weiterhin Pflicht) – z. B. `static` – legt fest,
+   in welchem Unterverzeichnis der Freigabe der Plugin-Root liegt.
+2. **View-Basispfad** (neu, optional) – z. B. `projekte/2026` – ein
+   statischer Präfix, der nur für diese eine View gilt.
+
+Beispiel: Plugin-Basispfad = `static`, View-Basispfad = `projekte/2026`
+→ die View listet den effektiven Pfad `static/projekte/2026`.
+
+Der bisherige `extra_subpath` in beiden Views ist jetzt konsistent auf
+den `from_field`-Modus beschränkt (dort weiterhin: Suffix hinter dem
+Feldwert der aktuellen Zeile). Im `static`-Modus zählt nur
+`view_base_path`.
+
+Der zusammengesetzte Pfad wird pro Segment slash-getrimmt und
+durchläuft `sanitizeRelativePath`, so dass `..`-Traversal, absolute
+Pfade, UNC-Präfixe usw. weiterhin abgelehnt werden.
+
+### Tests
+
+`test/sanitize.test.js` deckt jetzt zusätzlich die Pfad-Komposition
+(`view_base_path` + Feldwert + `extra_subpath`) inklusive Slash-
+Normalisierung, Modus-Regeln und Traversal-Ablehnung ab.
+
 ## [0.4.14] – 2026-07-06
 
 ### Changed – Code-Review / Aufräumen (keine Verhaltensänderung)

@@ -110,6 +110,103 @@ t("toSmbUrl encodes", () => {
   assert.strictEqual(url, "smb://srv/docs/proj/kunde%2042/akte.pdf");
 });
 
+// ==== view computeStartPath (view_base_path composition) ===================
+// Re-require the view modules to exercise their computeStartPath. Since
+// computeStartPath is not exported, we replicate the exact composition here
+// against the shared sanitizeRelativePath and treat any drift as a test bug
+// to fix in both places.
+function viewCompose(cfg, row) {
+  const parts = [];
+  if (cfg.view_base_path) parts.push(String(cfg.view_base_path));
+  if (cfg.mode === "from_field" && cfg.path_field && row) {
+    const v = row[cfg.path_field];
+    if (v) parts.push(String(v));
+  }
+  if (cfg.mode === "from_field" && cfg.extra_subpath)
+    parts.push(String(cfg.extra_subpath));
+  const joined = parts
+    .map((p) => p.replace(/^\/+|\/+$/g, ""))
+    .filter(Boolean)
+    .join("/");
+  return sanitizeRelativePath(joined);
+}
+
+t("view: only view_base_path (static)", () =>
+  assert.strictEqual(
+    viewCompose({ view_base_path: "projekte/2026", mode: "static" }, {}),
+    "projekte/2026"
+  ));
+t("view: view_base_path with leading/trailing slashes normalises", () =>
+  assert.strictEqual(
+    viewCompose({ view_base_path: "/projekte/2026/", mode: "static" }, {}),
+    "projekte/2026"
+  ));
+t("view: empty view_base_path in static mode → empty", () =>
+  assert.strictEqual(viewCompose({ mode: "static" }, {}), ""));
+t("view: from_field with view_base_path + field", () =>
+  assert.strictEqual(
+    viewCompose(
+      { view_base_path: "kunden", mode: "from_field", path_field: "nr" },
+      { nr: "42" }
+    ),
+    "kunden/42"
+  ));
+t("view: from_field with all three parts", () =>
+  assert.strictEqual(
+    viewCompose(
+      {
+        view_base_path: "kunden",
+        mode: "from_field",
+        path_field: "nr",
+        extra_subpath: "invoices",
+      },
+      { nr: "42" }
+    ),
+    "kunden/42/invoices"
+  ));
+t("view: extra_subpath ignored in static mode", () =>
+  assert.strictEqual(
+    viewCompose(
+      { view_base_path: "a", mode: "static", extra_subpath: "b" },
+      {}
+    ),
+    "a"
+  ));
+t("view: empty field value drops row segment", () =>
+  assert.strictEqual(
+    viewCompose(
+      { view_base_path: "a", mode: "from_field", path_field: "nr", extra_subpath: "c" },
+      { nr: "" }
+    ),
+    "a/c"
+  ));
+t("view: slashes in each part trimmed then joined", () =>
+  assert.strictEqual(
+    viewCompose(
+      {
+        view_base_path: "/a/",
+        mode: "from_field",
+        path_field: "nr",
+        extra_subpath: "/c/",
+      },
+      { nr: "/b/" }
+    ),
+    "a/b/c"
+  ));
+t("view: traversal in view_base_path rejected", () => {
+  assert.throws(() =>
+    viewCompose({ view_base_path: "../etc", mode: "static" }, {})
+  );
+});
+t("view: traversal in field value rejected", () => {
+  assert.throws(() =>
+    viewCompose(
+      { view_base_path: "a", mode: "from_field", path_field: "nr" },
+      { nr: "../etc" }
+    )
+  );
+});
+
 if (failed) {
   console.error("\n" + failed + " test(s) failed");
   process.exit(1);

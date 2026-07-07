@@ -519,22 +519,18 @@ function jsonOk(res, extra) {
 }
 
 /**
- * Validate that the request carries a CSRF token matching the session.
- * Saltcorn injects `req.csrfToken()` when the CSRF middleware is active;
- * we accept either the `_csrf` body field or the `x-csrf-token` header.
+ * CSRF verification is handled by Saltcorn's global csurf middleware
+ * (packages/server/app.js). By the time our route handler runs, csurf
+ * has already validated req.body._csrf / X-CSRF-Token / csrf-token /
+ * xsrf-token headers against the session secret. A manual re-check
+ * here would be wrong: csrf-tokens returns a NEW salted token on
+ * every call to req.csrfToken(), so `provided !== req.csrfToken()`
+ * would fail even for perfectly valid requests.
+ *
+ * We keep this stub as the single documented spot to attach future
+ * pre-flight authorisation checks if ever needed.
  */
-function checkCsrf(req, res) {
-  if (typeof req.csrfToken !== "function") return true; // CSRF disabled globally
-  const expected = req.csrfToken();
-  const provided =
-    (req.body && req.body._csrf) ||
-    req.headers["x-csrf-token"] ||
-    req.headers["csrf-token"] ||
-    req.query._csrf;
-  if (!provided || provided !== expected) {
-    jsonError(res, 403, "Invalid CSRF token");
-    return false;
-  }
+function checkCsrf(_req, _res) {
   return true;
 }
 
