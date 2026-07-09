@@ -50,6 +50,11 @@ const {
 } = require("./smb-client");
 const treeView = require("./tree-view");
 const fileManagerView = require("./filemanager-view");
+const {
+  catalogFor,
+  resolveLocaleFromReq,
+  availableLocales,
+} = require("./i18n");
 // pdf-view is intentionally NOT wired into the manifest (see note at bottom).
 // The file is kept in the package so the DB-linkage release can revive it.
 
@@ -1259,6 +1264,35 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
         jsonOk(res, { from: fromRel, to: toRel });
       } catch (e) {
         jsonError(res, 500, "Samba: " + (e.message || String(e)));
+      }
+    },
+  },
+
+  {
+    // GET /samba-i18n.json?locale=xx
+    //
+    // Liefert den vollen \u00dcbersetzungskatalog f\u00fcr die Client-Seite. Wird
+    // aktuell NICHT vom Standard-Bootstrap benutzt (die View-Shells injizieren
+    // den Katalog inline, spart einen Roundtrip). Die Route ist f\u00fcr
+    // externe Consumer / Debugging / dynamisches Nachladen einer anderen
+    // Sprache im Browser gedacht.
+    //
+    // Keine Authentifizierung: Katalog enth\u00e4lt nur \u00dcbersetzungstext,
+    // keine Konfiguration und keine share-spezifischen Daten.
+    url: "/samba-i18n.json",
+    method: "get",
+    callback: async (req, res) => {
+      try {
+        const locale = resolveLocaleFromReq(req, req.query && req.query.locale);
+        const catalog = catalogFor(locale);
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        // Kurzer Cache: Katalog \u00e4ndert sich nur bei Plugin-Release.
+        res.setHeader("Cache-Control", "public, max-age=300");
+        res.setHeader("X-Samba-Locale", locale);
+        res.setHeader("X-Samba-Available-Locales", availableLocales.join(","));
+        res.json(catalog);
+      } catch (e) {
+        res.status(500).json({ error: "i18n: " + (e.message || String(e)) });
       }
     },
   },

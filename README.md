@@ -304,6 +304,70 @@ führende/abschließende Punkte oder Windows-Reserved-Names enthalten.
 
 Unit-Tests zum Path- und Filename-Sanitizer laufen in CI (`npm test`).
 
+### Client-/Server-Trennung
+
+Damit klar ist, wo Sicherheit tatsächlich durchgesetzt wird: das Plugin
+läuft in zwei streng getrennten Welten.
+
+- **Serverseitig (Node.js im Saltcorn-Prozess):**
+  `index.js` (HTTP-Routen), `smb-client.js` (SMB3-Verbindung, Auth, Signing,
+  Encryption), `readdir-compat.js` (Verzeichnis-Listing),
+  `filemanager-view.js` / `tree-view.js` / `pdf-view.js`
+  (configuration_workflow, run, computeStartPath, sanitizeRelativePath),
+  `i18n.js` (Übersetzungskatalog) und `tools/diag-*.js` (CLI-Diagnose).
+  **SMB-Credentials (User, Domain, Passwort), Plugin-`base_path` und pro-View
+  `view_base_path` liegen ausschließlich serverseitig in der Saltcorn-DB.**
+  Der Browser sieht davon nichts.
+
+- **Clientseitig (Browser, unter `public/`):**
+  `samba-filemanager.js`, `samba-tree.js`, `samba-common.js` (gemeinsame
+  Utilities + i18n) und `samba.css`. Reine UI. Alle Zugriffe laufen über
+  `fetch()` mit `X-CSRF-Token`-Header.
+
+- **Enforcement-Punkte serverseitig — in jeder Request-Bearbeitung:**
+  1. **CSRF** – Saltcorns globale csurf-Middleware. Ohne Token: 403.
+  2. **Auth/Rolle** – Saltcorn prüft Login und View/Table-Rechte vor `run(…)`.
+     Zusätzlich prüft jede Route `min_role_read` bzw. `min_role_write`.
+  3. **Pfad-Sanitizing** – `sanitizeRelativePath` lehnt `..`, absolute Pfade,
+     UNC-Präfixe, Laufwerksbuchstaben und NUL-Bytes ab.
+  4. **Base-Path-Enforcement** – der effektive Pfad ist immer relativ zum
+     serverseitig konfigurierten `base_path`; `view_base_path` stammt aus der
+     View-Konfig, nie aus dem Request.
+  5. **SMB-Session** läuft mit dem serverseitig konfigurierten SMB-User; der
+     Client kann keine anderen Credentials injizieren.
+
+- **Wichtige Hinweise:**
+  `view_base_path` ist **keine** Sicherheitsgrenze zwischen Usern – nur
+  Bequemlichkeit. Für Mandantentrennung entweder eigene Views pro Mandant
+  (mit Rollen-Steuerung), oder mehrere Plugin-Instanzen mit unterschiedlichen
+  SMB-Usern. Produktions-Empfehlung: dedizierter SMB-Service-Account mit
+  minimalen Rechten; die Fileserver-ACL limitiert dann zusätzlich.
+
+- **Kurzfassung:** JavaScript in `public/` ist reine Kosmetik. Alle
+  Zugriffsrechte werden serverseitig durchgesetzt — ein manipulierter Client
+  bekommt genau die gleichen 403/400-Antworten wie ein regulärer.
+
+---
+
+## Internationalisierung (i18n)
+
+Ab v0.4.16 sind alle sichtbaren Texte übersetzbar. Ausgeliefert werden **de**
+und **en**.
+
+- Kataloge liegen als JSON unter `i18n/<locale>.json`.
+- Serverseitige Nutzung: `const { t, tFor } = require("./i18n");`
+  → `t("fm.upload.button", { locale: "de" })` bzw.
+  `const _t = tFor("de"); _t("fm.upload.button")`.
+- Clientseitig: `window.SambaCommon.t("fm.upload.button")`. Der Katalog wird
+  von der View-Shell inline in die Seite injiziert (kein Extra-Request).
+- Locale-Auflösung: explizit übergebener Wert → `req.getLocale()` →
+  `?locale=xx` → `Accept-Language` → Fallback `en`.
+- Neue Sprache ergänzen: `i18n/<locale>.json` anlegen, `availableLocales` in
+  `i18n.js` erweitern, PR aufmachen. Fehlt ein Key, greift automatisch der
+  englische Fallback — nichts bricht.
+- Diagnose-Endpoint: `GET /samba-i18n.json?locale=de` liefert den kompletten
+  Katalog als JSON (ohne Auth, enthält keine Konfiguration).
+
 ---
 
 ## Entwicklung

@@ -19,6 +19,7 @@ const Field = require("@saltcorn/data/models/field");
 const Table = require("@saltcorn/data/models/table");
 
 const { withClient, toSmbUrl, sanitizeRelativePath } = require("./smb-client");
+const { catalogFor, resolveLocaleFromReq, tFor } = require("./i18n");
 
 // ---------------------------------------------------------------------------
 // Configuration workflow
@@ -153,37 +154,59 @@ function computeStartPath(configuration, row) {
 // Render – client-side JS is served from /public/samba-tree.js
 // ---------------------------------------------------------------------------
 
-function renderShell(viewname, startPath, configuration) {
+/**
+ * Escaped-Serialisierung des i18n-Katalogs, damit ein enthaltenes `</script>`
+ * im \u00dcbersetzungstext den HTML-Parser nicht vorzeitig beendet.
+ */
+function serialiseCatalog(catalog) {
+  return JSON.stringify(catalog || {}).replace(/</g, "\\u003c");
+}
+
+function renderShell(viewname, startPath, configuration, locale, catalog) {
   const treeId = `samba-tree-${Math.random().toString(36).slice(2, 10)}`;
   const pluginVersion = configuration.__pluginVersion || "0.2.0";
+  const pathLabel = (catalog && catalog["ui.path"]) || "Path:";
   const opts = {
     viewname,
     startPath,
     pdfInline: !!configuration.pdf_inline,
     exposeSmbLink: configuration.expose_smb_link !== false,
     showHidden: !!configuration.show_hidden,
+    locale: locale || "en",
   };
+  const catalogJson = serialiseCatalog(catalog);
   return (
     div(
       { class: "samba-tree-container card p-2" },
       div(
         { class: "samba-tree-toolbar d-flex align-items-center mb-2" },
-        span({ class: "text-muted small me-2" }, "Path:"),
+        span({ class: "text-muted small me-2" }, pathLabel),
         span({ class: "samba-tree-breadcrumb small fw-bold" }, startPath || "/")
       ),
       div({ id: treeId, class: "samba-tree", "data-opts": JSON.stringify(opts) }),
       div({ id: treeId + "-viewer", class: "samba-viewer mt-3" })
     ) +
     script(
+      // Erst samba-common.js (i18n + Utilities) nachladen, Katalog setzen,
+      // danach die eigentliche samba-tree.js booten.
       `(function(){
-         function boot(){window.saltcornSambaMount && window.saltcornSambaMount(${JSON.stringify(
+         var CATALOG=${catalogJson};
+         function applyCatalog(){ if(window.SambaCommon && window.SambaCommon.setCatalog) window.SambaCommon.setCatalog(CATALOG); }
+         function mount(){window.saltcornSambaMount && window.saltcornSambaMount(${JSON.stringify(
            treeId
          )});}
-         if(window.saltcornSambaMount){boot();return;}
-         var s=document.createElement('script');
-         s.src='/plugins/public/saltcorn-samba@${pluginVersion}/samba-tree.js';
-         s.onload=boot;
-         document.head.appendChild(s);
+         function loadTree(){
+           if(window.saltcornSambaMount){ mount(); return; }
+           var s=document.createElement('script');
+           s.src='/plugins/public/saltcorn-samba@${pluginVersion}/samba-tree.js';
+           s.onload=mount;
+           document.head.appendChild(s);
+         }
+         if(window.SambaCommon){ applyCatalog(); loadTree(); return; }
+         var c=document.createElement('script');
+         c.src='/plugins/public/saltcorn-samba@${pluginVersion}/samba-common.js';
+         c.onload=function(){ applyCatalog(); loadTree(); };
+         document.head.appendChild(c);
        })();`
     )
   );
@@ -192,6 +215,16 @@ function renderShell(viewname, startPath, configuration) {
 // ---------------------------------------------------------------------------
 // View: run (single row) and runMany
 // ---------------------------------------------------------------------------
+
+/**
+ * Bestimmt Locale und Katalog aus dem Saltcorn-Request. `resolveLocaleFromReq`
+ * f\u00e4llt bei fehlendem `req` auf "en" zur\u00fcck – kein Crash, kein leeres UI.
+ */
+function resolveLocaleAndCatalog(extra) {
+  const req = extra && extra.req;
+  const locale = resolveLocaleFromReq(req);
+  return { locale, catalog: catalogFor(locale) };
+}
 
 async function run(table_id, viewname, configuration, state, extra) {
   // "state" typically contains the primary key of the row when the view is
@@ -207,13 +240,16 @@ async function run(table_id, viewname, configuration, state, extra) {
   try {
     startPath = computeStartPath(configuration, row || {});
   } catch (e) {
-    return div({ class: "alert alert-danger" }, "Samba tree: " + e.message);
+    const _t = tFor(resolveLocaleFromReq(extra && extra.req));
+    return div({ class: "alert alert-danger" }, _t("tree.samba_prefix") + e.message);
   }
-  return renderShell(viewname, startPath, configuration);
+  const { locale, catalog } = resolveLocaleAndCatalog(extra);
+  return renderShell(viewname, startPath, configuration, locale, catalog);
 }
 
 async function runMany(table_id, viewname, configuration, state, extra) {
   const rows = extra && extra.rows ? extra.rows : [];
+  const { locale, catalog } = resolveLocaleAndCatalog(extra);
   return rows.map((row) => ({
     html: renderShell(
       viewname,
@@ -224,7 +260,9 @@ async function runMany(table_id, viewname, configuration, state, extra) {
           return "";
         }
       })(),
-      configuration
+      configuration,
+      locale,
+      catalog
     ),
     row,
   }));

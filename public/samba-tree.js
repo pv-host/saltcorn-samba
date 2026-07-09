@@ -1,88 +1,69 @@
 /**
- * Client-side directory tree for the SambaTree view template.
+ * saltcorn-samba – Client-Controller für die `SambaTree`-View.
  *
- * Exposes window.saltcornSambaMount(elementId). The tree lazily loads
- * children from /sambadir?path=... and opens files either inline (PDF/image)
- * in the built-in viewer <div> or by redirecting to /sambalink (smb://).
+ * Rendert einen Lazy-loading-Verzeichnisbaum. Kinder werden per Klick über
+ * /sambadir?path=... nachgeladen. Klick auf eine Datei öffnet sie entweder
+ * inline (PDF/Bilder) im eingebauten Viewer <div> oder springt via /sambalink
+ * (smb://) in den nativen Datei-Manager.
+ *
+ * Utilities (iconFor, joinPath, fmtSize, isViewable, i18n-Übersetzungen)
+ * kommen aus dem gemeinsamen Modul `SambaCommon` (public/samba-common.js),
+ * das der Server per <script>-Tag vor dieser Datei einbindet.
  */
 (function () {
   "use strict";
 
-  function h(tag, attrs, children) {
+  var C = window.SambaCommon || {};
+
+  /**
+   * Kleines DOM-Konstruktions-Helferlein. `attrs` unterstützt `class`,
+   * `text` (setzt textContent) und beliebige `onXxx`-Handler; alle anderen
+   * Attribute landen als HTML-Attribut.
+   */
+  function element(tag, attrs, children) {
     var el = document.createElement(tag);
-    if (attrs)
-      Object.keys(attrs).forEach(function (k) {
-        if (k === "class") el.className = attrs[k];
-        else if (k === "text") el.textContent = attrs[k];
-        else if (k.slice(0, 2) === "on")
-          el.addEventListener(k.slice(2).toLowerCase(), attrs[k]);
-        else el.setAttribute(k, attrs[k]);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (key) {
+        if (key === "class") el.className = attrs[key];
+        else if (key === "text") el.textContent = attrs[key];
+        else if (key.slice(0, 2) === "on") {
+          el.addEventListener(key.slice(2).toLowerCase(), attrs[key]);
+        } else {
+          el.setAttribute(key, attrs[key]);
+        }
       });
-    (children || []).forEach(function (c) {
-      if (c == null) return;
-      el.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    }
+    (children || []).forEach(function (child) {
+      if (child == null) return;
+      el.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
     });
     return el;
   }
 
-  function iconFor(item) {
-    if (item.isDir) return "📁";
-    var n = (item.name || "").toLowerCase();
-    if (n.endsWith(".pdf")) return "📄";
-    if (/\.(png|jpe?g|gif|webp|svg|bmp)$/.test(n)) return "🖼️";
-    if (/\.(docx?|odt|rtf|txt|md)$/.test(n)) return "📝";
-    if (/\.(xlsx?|ods|csv)$/.test(n)) return "📊";
-    if (/\.(zip|tar|gz|7z|rar)$/.test(n)) return "🗜️";
-    return "📎";
-  }
-
-  function isViewable(name) {
-    var n = (name || "").toLowerCase();
-    return (
-      n.endsWith(".pdf") ||
-      /\.(png|jpe?g|gif|webp|svg|bmp)$/.test(n) ||
-      /\.(txt|md|json|xml|csv|html?)$/.test(n)
-    );
-  }
-
-  function joinPath(a, b) {
-    if (!a) return b;
-    if (!b) return a;
-    return (a.replace(/\/+$/, "") + "/" + b.replace(/^\/+/, "")).replace(
-      /\/+/g,
-      "/"
-    );
-  }
-
-  function fmtSize(n) {
-    if (!n) return "";
-    var u = ["B", "KB", "MB", "GB", "TB"];
-    var i = 0;
-    while (n >= 1024 && i < u.length - 1) {
-      n /= 1024;
-      i++;
-    }
-    return n.toFixed(n >= 10 || i === 0 ? 0 : 1) + " " + u[i];
-  }
-
-  async function fetchDir(path, showHidden) {
+  /** GET /sambadir für ein Verzeichnis. Wirft bei nicht-OK-Antworten. */
+  async function fetchDirectory(path, showHidden) {
     var url =
-      "/sambadir?path=" +
-      encodeURIComponent(path || "") +
+      "/sambadir?path=" + encodeURIComponent(path || "") +
       (showHidden ? "&show_hidden=1" : "");
-    var r = await fetch(url, { credentials: "same-origin" });
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    return r.json();
+    var response = await fetch(url, { credentials: "same-origin" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    return response.json();
   }
 
-  function renderList(container, path, items, opts, viewerEl) {
+  /**
+   * Rendert eine Ebene des Baums in `container`. Für jedes Item wird eine
+   * Zeile mit Toggle-, Label- und Meta-Span erzeugt; Ordner haben zusätzlich
+   * einen leeren Kindercontainer, der bei Bedarf lazy befüllt wird.
+   */
+  function renderLevel(container, path, items, opts, viewerElement) {
     container.innerHTML = "";
-    var ul = h("ul", { class: "samba-tree-list list-unstyled mb-0" }, []);
+    var list = element("ul", { class: "samba-tree-list list-unstyled mb-0" }, []);
 
     items.forEach(function (item) {
-      var full = joinPath(path, item.name);
-      var childrenBox = h("div", { class: "samba-tree-children ms-3" }, []);
-      var toggle = h(
+      var fullPath = C.joinPath(path, item.name);
+      var childrenBox = element("div", { class: "samba-tree-children ms-3" }, []);
+
+      var toggle = element(
         "span",
         {
           class: "samba-tree-toggle me-1",
@@ -91,120 +72,126 @@
         },
         []
       );
-      var label = h(
+      var label = element(
         "span",
         {
           class: "samba-tree-label",
-          text: iconFor(item) + " " + item.name,
+          text: C.iconFor(item) + " " + item.name,
           style: "cursor:pointer;",
-          title: full,
+          title: fullPath,
         },
         []
       );
-      var meta = h(
+      var meta = element(
         "span",
         {
           class: "samba-tree-meta text-muted small ms-2",
-          text: item.isDir ? "" : fmtSize(item.size),
+          text: item.isDir ? "" : C.fmtSize(item.size),
         },
         []
       );
 
-      var externalBtn = null;
+      var externalButton = null;
       if (opts.exposeSmbLink) {
-        externalBtn = h(
+        externalButton = element(
           "a",
           {
             class: "samba-tree-external btn btn-sm btn-link p-0 ms-2",
-            href: "/sambalink?path=" + encodeURIComponent(full),
+            href: "/sambalink?path=" + encodeURIComponent(fullPath),
             target: "_blank",
-            title: "Open in file manager",
+            title: C.t("tree.open_in_fm_title"),
             text: "↗",
           },
           []
         );
       }
 
-      var openDir = function () {
+      /**
+       * Toggle-Handler: erster Klick lädt die Kinder nach, weitere Klicks
+       * schalten nur zwischen ausgeklappt/eingeklappt um.
+       */
+      var toggleDirectory = function () {
         if (childrenBox.dataset.loaded === "1") {
-          var vis = childrenBox.style.display !== "none";
-          childrenBox.style.display = vis ? "none" : "block";
-          toggle.textContent = vis ? "▸" : "▾";
+          var visible = childrenBox.style.display !== "none";
+          childrenBox.style.display = visible ? "none" : "block";
+          toggle.textContent = visible ? "▸" : "▾";
           return;
         }
         toggle.textContent = "…";
-        fetchDir(full, opts.showHidden)
+        fetchDirectory(fullPath, opts.showHidden)
           .then(function (data) {
-            renderList(childrenBox, full, data.items || [], opts, viewerEl);
+            renderLevel(childrenBox, fullPath, data.items || [], opts, viewerElement);
             childrenBox.dataset.loaded = "1";
             childrenBox.style.display = "block";
             toggle.textContent = "▾";
           })
-          .catch(function (e) {
+          .catch(function (err) {
             childrenBox.innerHTML =
-              '<div class="text-danger small">Error: ' + e.message + "</div>";
+              '<div class="text-danger small">' + C.t("tree.error_prefix") + err.message + "</div>";
             childrenBox.dataset.loaded = "1";
             toggle.textContent = "▸";
           });
       };
 
+      /**
+       * Datei-Klick-Handler: inline für ansehbare Formate, sonst Sprung ins
+       * OS-Datei-Manager-Fenster.
+       */
       var openFile = function () {
-        if (!viewerEl) return;
-        if (opts.pdfInline && isViewable(item.name)) {
-          var url =
-            "/sambafile?path=" +
-            encodeURIComponent(full) +
-            "&disposition=inline";
-          var isImg = /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(item.name);
-          viewerEl.innerHTML = "";
-          var header = h(
+        if (!viewerElement) return;
+        if (opts.pdfInline && C.isViewable(item.name)) {
+          var streamUrl =
+            "/sambafile?path=" + encodeURIComponent(fullPath) + "&disposition=inline";
+          var isImage = /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(item.name);
+          viewerElement.innerHTML = "";
+          var header = element(
             "div",
             { class: "samba-viewer-header d-flex align-items-center mb-2" },
             [
-              h("strong", { text: item.name }, []),
-              h(
+              element("strong", { text: item.name }, []),
+              element(
                 "a",
                 {
-                  href: url,
+                  href: streamUrl,
                   target: "_blank",
                   class: "btn btn-sm btn-outline-secondary ms-auto me-2",
-                  text: "Open in new tab",
+                  text: C.t("tree.open_new_tab"),
                 },
                 []
               ),
-              h(
+              element(
                 "a",
                 {
                   href:
                     "/sambafile?path=" +
-                    encodeURIComponent(full) +
+                    encodeURIComponent(fullPath) +
                     "&disposition=attachment",
                   class: "btn btn-sm btn-outline-secondary me-2",
-                  text: "Download",
+                  text: C.t("fm.download"),
                 },
                 []
               ),
               opts.exposeSmbLink
-                ? h(
+                ? element(
                     "a",
                     {
-                      href: "/sambalink?path=" + encodeURIComponent(full),
+                      href: "/sambalink?path=" + encodeURIComponent(fullPath),
                       target: "_blank",
                       class: "btn btn-sm btn-outline-primary",
-                      text: "Open in file manager",
+                      text: C.t("tree.open_in_fm"),
                     },
                     []
                   )
                 : null,
             ]
           );
-          viewerEl.appendChild(header);
-          if (isImg) {
-            viewerEl.appendChild(
-              h(
+          viewerElement.appendChild(header);
+          if (isImage) {
+            viewerElement.appendChild(
+              element(
                 "img",
                 {
-                  src: url,
+                  src: streamUrl,
                   style:
                     "max-width:100%;max-height:70vh;border:1px solid #dee2e6;border-radius:4px;",
                 },
@@ -212,11 +199,11 @@
               )
             );
           } else {
-            viewerEl.appendChild(
-              h(
+            viewerElement.appendChild(
+              element(
                 "iframe",
                 {
-                  src: url,
+                  src: streamUrl,
                   style:
                     "width:100%;height:70vh;border:1px solid #dee2e6;border-radius:4px;",
                 },
@@ -225,66 +212,68 @@
             );
           }
         } else {
-          // Not inline-viewable – fall back to the external link page.
-          window.open(
-            "/sambalink?path=" + encodeURIComponent(full),
-            "_blank"
-          );
+          // Nicht inline-fähig: Klassischer Sprung in die smb://-Zwischenseite.
+          window.open("/sambalink?path=" + encodeURIComponent(fullPath), "_blank");
         }
       };
 
       label.addEventListener("click", function () {
-        if (item.isDir) openDir();
+        if (item.isDir) toggleDirectory();
         else openFile();
       });
       toggle.addEventListener("click", function () {
-        if (item.isDir) openDir();
+        if (item.isDir) toggleDirectory();
       });
 
       var lineChildren = [toggle, label, meta];
-      if (externalBtn) lineChildren.push(externalBtn);
+      if (externalButton) lineChildren.push(externalButton);
 
-      var li = h("li", { class: "samba-tree-item" }, [
-        h("div", { class: "samba-tree-line d-flex align-items-center" }, lineChildren),
+      var lineItem = element("li", { class: "samba-tree-item" }, [
+        element("div", { class: "samba-tree-line d-flex align-items-center" }, lineChildren),
         childrenBox,
       ]);
       childrenBox.style.display = "none";
-      ul.appendChild(li);
+      list.appendChild(lineItem);
     });
 
     if (!items.length) {
       container.appendChild(
-        h(
+        element(
           "div",
-          { class: "text-muted small fst-italic p-2", text: "(empty)" },
+          { class: "text-muted small fst-italic p-2", text: C.t("ui.empty_short") },
           []
         )
       );
     } else {
-      container.appendChild(ul);
+      container.appendChild(list);
     }
   }
 
-  function mount(elId) {
-    var el = document.getElementById(elId);
-    if (!el || el.dataset.mounted === "1") return;
-    el.dataset.mounted = "1";
-    var viewer = document.getElementById(elId + "-viewer");
+  /**
+   * Einstiegspunkt – vom View-Shell aufgerufen.
+   * `elementId` bezeichnet das Baum-Root-`<div>`; ein optionales
+   * `elementId + "-viewer"` wird als Inline-Anzeige verwendet.
+   */
+  function mount(elementId) {
+    var root = document.getElementById(elementId);
+    if (!root || root.dataset.mounted === "1") return;
+    root.dataset.mounted = "1";
+    var viewer = document.getElementById(elementId + "-viewer");
     var opts = {};
     try {
-      opts = JSON.parse(el.getAttribute("data-opts") || "{}");
+      opts = JSON.parse(root.getAttribute("data-opts") || "{}");
     } catch (_) {
       opts = {};
     }
-    el.innerHTML =
-      '<div class="text-muted small p-2">Loading…</div>';
-    fetchDir(opts.startPath || "", opts.showHidden)
+    root.innerHTML =
+      '<div class="text-muted small p-2">' + C.t("ui.loading") + "</div>";
+    fetchDirectory(opts.startPath || "", opts.showHidden)
       .then(function (data) {
-        renderList(el, opts.startPath || "", data.items || [], opts, viewer);
+        renderLevel(root, opts.startPath || "", data.items || [], opts, viewer);
       })
-      .catch(function (e) {
-        el.innerHTML =
-          '<div class="alert alert-danger">Samba: ' + e.message + "</div>";
+      .catch(function (err) {
+        root.innerHTML =
+          '<div class="alert alert-danger">' + C.t("tree.samba_prefix") + err.message + "</div>";
       });
   }
 

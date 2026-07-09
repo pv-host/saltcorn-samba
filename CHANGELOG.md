@@ -4,6 +4,102 @@ All notable changes to `saltcorn-samba` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.16] – 2026-07-08
+
+### Added – Internationalisierung (Deutsch + Englisch)
+
+Alle sichtbaren Texte im File-Manager, im Tree, im PDF-Fieldview und in den
+Dialogen (Upload, Delete, Rename, Mkdir) sind jetzt übersetzbar.
+
+- Neue Kataloge unter `i18n/de.json` und `i18n/en.json` (~90 Schlüssel,
+  Punkt-Notation nach Bereich `ui.*`, `fm.*`, `tree.*`, `pdf.*`).
+- Neues Server-Modul `i18n.js` – keine externe Dependency, JSON-Kataloge
+  werden gelesen und im Prozess gecacht. Placeholder-Interpolation `{name}`.
+  API: `t(key, {locale, ...params})`, `tFor(locale)`, `catalogFor(locale)`,
+  `resolveLocaleFromReq(req, explicit)`.
+- Locale-Auflösung: expliziter Wert → `req.getLocale()` → Query `?locale=xx`
+  → `Accept-Language`-Header → Fallback `en`. Unbekannte Locales fallen
+  automatisch auf die Sprachbasis oder `en` zurück.
+- Neue Diagnose-Route `GET /samba-i18n.json?locale=xx` liefert den Katalog
+  als JSON (kein Auth, enthält keine Konfiguration).
+- Client bekommt den Katalog **inline** in die View-Shell injiziert – kein
+  zusätzlicher HTTP-Roundtrip beim ersten Rendern, keine englischen Keys, die
+  kurz aufblitzen. `SambaCommon.setCatalog(…)` wird aufgerufen, bevor die
+  view-spezifische JS-Datei geladen wird.
+- Fehlt ein Key: automatischer Fallback auf Englisch, dann auf den Key
+  selbst – nichts bricht.
+
+### Changed – Client-JS: Gemeinsame Utilities in `public/samba-common.js`
+
+- Neues Modul `public/samba-common.js` bündelt: `iconFor()`, `extOf()`,
+  `mediaTypeFor()`, `isViewable()`, `fmtSize()`, `fmtDate()`, `joinPath()`,
+  `parentOf()`, plus die i18n-Funktionen `t()`, `setCatalog()`, `loadCatalog()`.
+- **`iconFor()` war bisher in `samba-filemanager.js` und `samba-tree.js`
+  identisch dupliziert** – jetzt einzige Quelle in `samba-common.js`.
+  Änderungen am Icon-Mapping (neue Extensions etc.) müssen nur noch an einer
+  Stelle gemacht werden.
+- `samba-filemanager.js` und `samba-tree.js` konsumieren die Utilities über
+  `window.SambaCommon`. Die lokalen Kopien von `iconFor`, `extOf`,
+  `mediaTypeFor`, `isViewable`, `fmtSize`, `fmtDate`, `joinPath`, `parentOf`
+  sind entfernt.
+- Alle sichtbaren Strings in beiden Client-JS gehen über `SambaCommon.t(...)`.
+
+### Changed – Bootstrap der View-Shells: zweistufig
+
+`filemanager-view.js` und `tree-view.js` laden jetzt zuerst `samba-common.js`
+(setzt `window.SambaCommon`, wendet den inline gelieferten i18n-Katalog an)
+und erst danach die view-spezifische JS-Datei. Sind beide bereits geladen,
+wird nur re-mounted – kein doppeltes `<script>`-Injecten. `pdf-view.js`
+nutzt serverseitig `tFor(resolveLocaleFromReq(req))`.
+
+### Changed – Namens-Cleanup und Kommentare in beiden Client-JS
+
+Goal: die Client-Dateien sollen sich wie ordentliche Node-ähnliche Module
+lesen, nicht wie ein Minifier-Output.
+
+- `samba-tree.js`: `h`→`element`, `fetchDir`→`fetchDirectory`,
+  `renderList`→`renderLevel`, `openDir`→`toggleDirectory`, `li`→`lineItem`
+  u.ä. Jede exportierte / interne Funktion hat einen JSDoc-Kommentar.
+- `samba-filemanager.js`: `h`→`element`, `modal`→`openModal`, `m`→`dialog`,
+  `r`→`response`, `fd`→`formData`, `overwriteCb`→`overwriteCheckbox`,
+  `picked`→`pickedList`, `uploadBtn`→`uploadButton`. Kommentare ergänzt.
+
+### Added – README: Sicherheits-Abschnitt „Client-/Server-Trennung“
+
+Neuer Unterabschnitt in `## Sicherheit` erklärt explizit:
+
+- Welche Dateien serverseitig laufen (SMB-Credentials, `base_path`,
+  `view_base_path`, Sanitizer, Routen) und welche clientseitig (reine UI).
+- Wo genau Sicherheit durchgesetzt wird: CSRF (Saltcorn-csurf), Auth/Rolle
+  (Saltcorn + `min_role_read`/`min_role_write`), `sanitizeRelativePath`,
+  Base-Path-Enforcement, SMB-Session mit serverseitig konfiguriertem User.
+- Wichtiger Hinweis: `view_base_path` ist **keine** Sicherheitsgrenze
+  zwischen Usern; für Mandantentrennung entweder Rollen-gated Views oder
+  eigene Plugin-Instanzen mit separaten SMB-Usern.
+- Kurzfassung: JavaScript in `public/` ist reine Kosmetik; jeder Client (auch
+  ein manipulierter) bekommt dieselben 403/400-Antworten wie ein regulärer.
+
+Zusätzlich neuer Abschnitt `## Internationalisierung (i18n)` mit
+Entwickler-Doku (Kataloge ergänzen, API, Locale-Auflösung, Diagnose-Route).
+
+### Packaging
+
+- `package.json`: Version 0.4.15 → 0.4.16. `files` ergänzt um `i18n.js` und
+  `i18n/`. `lint`-Script prüft jetzt auch `i18n.js` und `public/samba-common.js`.
+- Keine neuen Runtime-Dependencies. Fortlaufend: nur `smb3-client ^0.2.0`.
+
+### Compatibility
+
+Rückwärtskompatibel:
+
+- Alle bestehenden Routen (`/sambadir`, `/sambafile`, `/sambalink`,
+  `/sambaupload`, `/sambadelete`, `/sambarename`, `/sambamkdir`, `/sambatest`)
+  unverändert in Signatur und Verhalten.
+- View-Konfigurationsschema unverändert; existierende Views laufen weiter.
+- Wer die Client-JS direkt einbindet, muss zusätzlich `samba-common.js` vor
+  `samba-filemanager.js` / `samba-tree.js` laden (das übernimmt die
+  View-Shell automatisch).
+
 ## [0.4.15] – 2026-07-07
 
 ### Fixed – CSRF-Fehlermeldung bei Upload / Ordner anlegen / Rename / Delete

@@ -20,6 +20,7 @@ const {
   button,
 } = require("@saltcorn/markup/tags");
 const { text } = require("@saltcorn/markup");
+const { tFor, resolveLocaleFromReq } = require("./i18n");
 
 /** Extract the file extension in lowercase, without the dot. */
 function extOf(name) {
@@ -88,7 +89,9 @@ const samba_pdf = {
     },
   ],
   run: (value, req, options = {}) => {
-    if (!value) return span({ class: "text-muted" }, "—");
+    // Locale aus dem Saltcorn-Request; bei fehlendem req greift automatisch "en".
+    const _t = tFor(resolveLocaleFromReq(req));
+    if (!value) return span({ class: "text-muted" }, _t("pdf.empty"));
     const safeVal = text(String(value));
     const height = Number(options.height) > 0 ? Number(options.height) : 700;
 
@@ -101,7 +104,7 @@ const samba_pdf = {
             class: "btn btn-sm btn-outline-secondary me-2",
           },
           i({ class: "fas fa-download me-1" }),
-          "Download"
+          _t("pdf.download")
         )
       );
     }
@@ -111,10 +114,10 @@ const samba_pdf = {
           {
             href: smbUrl(safeVal),
             class: "btn btn-sm btn-outline-primary me-2",
-            title: "Open in Nemo/Nautilus/Explorer",
+            title: _t("pdf.open_in_fm_title"),
           },
           i({ class: "fas fa-external-link-alt me-1" }),
-          "Open in file manager"
+          _t("pdf.open_in_fm")
         )
       );
     }
@@ -126,7 +129,7 @@ const samba_pdf = {
           class: "btn btn-sm btn-outline-secondary",
         },
         i({ class: "fas fa-eye me-1" }),
-        "Open in new tab"
+        _t("pdf.open_new_tab")
       )
     );
 

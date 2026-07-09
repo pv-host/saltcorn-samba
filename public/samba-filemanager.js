@@ -1,165 +1,123 @@
 /**
- * Client-side controller for the SambaFileManager view (v0.3.0).
+ * saltcorn-samba – Client-Controller für die `SambaFileManager`-View.
  *
- * Adds upload, rename, delete and mkdir on top of the read-only browser.
- * Every write action goes through /sambaupload | /sambadelete | /sambarename
- * | /sambamkdir with a CSRF token (rendered into the shell) and expects
- * JSON responses.
+ * Ergänzt zur reinen Anzeige aus samba-tree.js noch Upload, Rename, Delete
+ * und Mkdir. Jede Schreib-Aktion geht über eine der Routen
+ *   /sambaupload | /sambadelete | /sambarename | /sambamkdir
+ * mit einem CSRF-Token, das in der View-Shell in den JavaScript-Kontext
+ * eingebettet wird und pro Request als X-CSRF-Token-Header mitgesendet wird.
+ *
+ * Gemeinsame Utilities (iconFor, joinPath, fmtSize, fmtDate, i18n) leben
+ * in public/samba-common.js und werden via window.SambaCommon konsumiert.
+ * Dadurch entfällt die frühere Duplizierung von iconFor() in beiden Client-JS.
  */
 (function () {
   "use strict";
 
-  // ---- tiny DOM helper ----------------------------------------------------
-  function h(tag, attrs, children) {
+  var C = window.SambaCommon || {};
+
+  // ---- DOM-Helper --------------------------------------------------------
+  /**
+   * Minimaler DOM-Konstruktor. Attribute `class`, `text` und `on…`-Handler
+   * werden speziell behandelt; alles andere landet als HTML-Attribut. Kinder
+   * dürfen Strings (Textknoten) oder Elemente sein; `null` wird verworfen.
+   */
+  function element(tag, attrs, children) {
     var el = document.createElement(tag);
-    if (attrs)
-      Object.keys(attrs).forEach(function (k) {
-        if (k === "class") el.className = attrs[k];
-        else if (k === "text") el.textContent = attrs[k];
-        else if (k === "html") el.innerHTML = attrs[k];
-        else if (k.slice(0, 2) === "on")
-          el.addEventListener(k.slice(2).toLowerCase(), attrs[k]);
-        else el.setAttribute(k, attrs[k]);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (key) {
+        if (key === "class") el.className = attrs[key];
+        else if (key === "text") el.textContent = attrs[key];
+        else if (key === "html") el.innerHTML = attrs[key];
+        else if (key.slice(0, 2) === "on")
+          el.addEventListener(key.slice(2).toLowerCase(), attrs[key]);
+        else el.setAttribute(key, attrs[key]);
       });
-    (children || []).forEach(function (c) {
-      if (c == null) return;
-      el.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    }
+    (children || []).forEach(function (child) {
+      if (child == null) return;
+      el.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
     });
     return el;
   }
 
-  // ---- helpers ------------------------------------------------------------
-  function extOf(name) {
-    var s = String(name || "");
-    var d = s.lastIndexOf(".");
-    return d >= 0 ? s.slice(d + 1).toLowerCase() : "";
-  }
-  function iconFor(item) {
-    if (item.isDir) return "📁";
-    var e = extOf(item.name);
-    if (e === "pdf") return "📄";
-    if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"].indexOf(e) >= 0) return "🖼️";
-    if (["doc", "docx", "odt", "rtf", "txt", "md"].indexOf(e) >= 0) return "📝";
-    if (["xls", "xlsx", "ods", "csv"].indexOf(e) >= 0) return "📊";
-    if (["ppt", "pptx", "odp"].indexOf(e) >= 0) return "📽️";
-    if (["zip", "tar", "gz", "7z", "rar"].indexOf(e) >= 0) return "🗜️";
-    if (["mp3", "wav", "ogg", "flac", "m4a"].indexOf(e) >= 0) return "🎵";
-    if (["mp4", "mkv", "mov", "avi", "webm"].indexOf(e) >= 0) return "🎬";
-    return "📎";
-  }
-  function mediaTypeFor(item) {
-    if (item.isDir) return "folder";
-    var e = extOf(item.name);
-    var map = {
-      pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
-      gif: "image/gif", webp: "image/webp", svg: "image/svg+xml",
-      txt: "text/plain", md: "text/markdown", csv: "text/csv",
-      json: "application/json", xml: "application/xml", html: "text/html", htm: "text/html",
-      zip: "application/zip", doc: "application/msword",
-      docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      xls: "application/vnd.ms-excel",
-      xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      ppt: "application/vnd.ms-powerpoint",
-      pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-      mp3: "audio/mpeg", mp4: "video/mp4", mkv: "video/x-matroska",
-      mov: "video/quicktime", avi: "video/x-msvideo",
-    };
-    return map[e] || (e ? "application/" + e : "application/octet-stream");
-  }
-  function fmtSize(n) {
-    if (!n || n < 0) return "";
-    if (n < 1024) return n + " B";
-    var kib = n / 1024;
-    if (kib < 1024) return kib.toFixed(kib < 10 ? 1 : 0) + " KiB";
-    var mib = kib / 1024;
-    if (mib < 1024) return mib.toFixed(mib < 10 ? 1 : 0) + " MiB";
-    return (mib / 1024).toFixed(2) + " GiB";
-  }
-  function fmtDate(v) {
-    if (!v) return "";
-    var d = new Date(v);
-    if (isNaN(d.getTime())) return "";
-    var pad = function (x) { return String(x).padStart(2, "0"); };
-    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
-      " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
-  }
-  function joinPath(a, b) {
-    if (!a) return b;
-    if (!b) return a;
-    return (a.replace(/\/+$/, "") + "/" + b.replace(/^\/+/, "")).replace(/\/+/g, "/");
-  }
-  function parentOf(p) {
-    if (!p) return "";
-    var i = p.lastIndexOf("/");
-    return i < 0 ? "" : p.slice(0, i);
-  }
-  function isViewable(name) {
-    var n = (name || "").toLowerCase();
-    return n.endsWith(".pdf") ||
-      /\.(png|jpe?g|gif|webp|svg|bmp)$/.test(n) ||
-      /\.(txt|md|json|xml|csv|html?)$/.test(n);
+  // ---- HTTP-Helper -------------------------------------------------------
+  /**
+   * GET /sambadir mit definierten Fehlermeldungen: JSON-`error`-Feld
+   * schlägt HTTP-Status als Meldung.
+   */
+  async function fetchDirectory(path, showHidden) {
+    var url =
+      "/sambadir?path=" + encodeURIComponent(path || "") +
+      (showHidden ? "&show_hidden=1" : "");
+    var response = await fetch(url, { credentials: "same-origin" });
+    if (!response.ok) {
+      var msg;
+      try { msg = (await response.json()).error; } catch (_) { msg = "HTTP " + response.status; }
+      throw new Error(msg || "HTTP " + response.status);
+    }
+    return response.json();
   }
 
-  // ---- http helpers -------------------------------------------------------
-  async function fetchDir(path, showHidden) {
-    var url = "/sambadir?path=" + encodeURIComponent(path || "") +
-      (showHidden ? "&show_hidden=1" : "");
-    var r = await fetch(url, { credentials: "same-origin" });
-    if (!r.ok) {
-      var msg;
-      try { msg = (await r.json()).error; } catch (_) { msg = "HTTP " + r.status; }
-      throw new Error(msg || "HTTP " + r.status);
-    }
-    return r.json();
-  }
-  async function postJson(url, body, csrf) {
-    var r = await fetch(url, {
+  /**
+   * POST als JSON mit CSRF-Token-Header. Erwartet JSON-Antwort mit optionalem
+   * `error`-Feld; Status-Code wird bei Fehlern als `.status` durchgereicht.
+   */
+  async function postJson(url, body, csrfToken) {
+    var response = await fetch(url, {
       method: "POST",
       credentials: "same-origin",
       headers: {
         "Content-Type": "application/json",
-        "X-CSRF-Token": csrf || "",
+        "X-CSRF-Token": csrfToken || "",
       },
       body: JSON.stringify(body || {}),
     });
     var data = null;
-    try { data = await r.json(); } catch (_) { data = null; }
-    if (!r.ok) {
-      var msg = (data && data.error) || ("HTTP " + r.status);
+    try { data = await response.json(); } catch (_) { data = null; }
+    if (!response.ok) {
+      var msg = (data && data.error) || ("HTTP " + response.status);
       var err = new Error(msg);
-      err.status = r.status;
+      err.status = response.status;
       err.body = data;
       throw err;
     }
     return data || { ok: true };
   }
 
-  // ---- modal & toast ------------------------------------------------------
-  function toast(msg, type) {
-    var box = h("div", {
+  // ---- Toast + Modal -----------------------------------------------------
+  /** Zeigt eine kurze Feedback-Nachricht am Bildschirmrand. */
+  function toast(message, type) {
+    var box = element("div", {
       class: "samba-toast samba-toast-" + (type || "info"),
-      text: msg,
+      text: message,
     }, []);
     document.body.appendChild(box);
     setTimeout(function () { box.classList.add("samba-toast-hide"); }, 3200);
     setTimeout(function () { if (box.parentNode) box.parentNode.removeChild(box); }, 3800);
   }
-  function modal(title, bodyEl, footerEls) {
-    var backdrop = h("div", { class: "samba-modal-backdrop" }, []);
-    var modalEl = h("div", { class: "samba-modal card" }, [
-      h("div", { class: "samba-modal-header card-header d-flex align-items-center" }, [
-        h("strong", { text: title }, []),
-        h("button", {
+
+  /**
+   * Baut einen einfachen Modal-Dialog auf. Rückgabe: `{ close, root }`;
+   * ESC und Klick auf den Backdrop schließen automatisch.
+   */
+  function openModal(title, bodyElement, footerElements) {
+    var backdrop = element("div", { class: "samba-modal-backdrop" }, []);
+    var modalRoot = element("div", { class: "samba-modal card" }, [
+      element("div", { class: "samba-modal-header card-header d-flex align-items-center" }, [
+        element("strong", { text: title }, []),
+        element("button", {
           type: "button", class: "btn-close ms-auto",
-          "aria-label": "Close",
+          "aria-label": C.t("ui.close"),
           onclick: function () { close(); },
         }, []),
       ]),
-      h("div", { class: "samba-modal-body card-body" }, [bodyEl]),
-      h("div", { class: "samba-modal-footer card-footer d-flex justify-content-end gap-2" }, footerEls || []),
+      element("div", { class: "samba-modal-body card-body" }, [bodyElement]),
+      element("div", { class: "samba-modal-footer card-footer d-flex justify-content-end gap-2" }, footerElements || []),
     ]);
-    backdrop.appendChild(modalEl);
+    backdrop.appendChild(modalRoot);
     document.body.appendChild(backdrop);
+
     function close() {
       if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
       document.removeEventListener("keydown", onKey);
@@ -169,20 +127,25 @@
     backdrop.addEventListener("click", function (e) {
       if (e.target === backdrop) close();
     });
-    return { close: close, root: modalEl };
+    return { close: close, root: modalRoot };
   }
 
-  // ---- component ----------------------------------------------------------
+  // ---- Komponente --------------------------------------------------------
+  /**
+   * Baut den File-Manager-State auf und rendert Toolbar + Tabelle in die
+   * vom Server vorbereiteten `<div>`-Elemente. Wird von der View-Shell
+   * genau einmal pro Instanz mit `mount(id, opts)` aufgerufen.
+   */
   function mount(id, opts) {
     opts = opts || {};
-    var root = document.getElementById(id + "-list");
-    if (!root) return;
-    if (root.dataset.mounted === "1") return;
-    root.dataset.mounted = "1";
+    var listRoot = document.getElementById(id + "-list");
+    if (!listRoot) return;
+    if (listRoot.dataset.mounted === "1") return;
+    listRoot.dataset.mounted = "1";
 
-    var toolbar = document.getElementById(id + "-toolbar");
-    var counter = document.getElementById(id + "-count");
-    var viewer = document.getElementById(id + "-viewer");
+    var toolbarRoot = document.getElementById(id + "-toolbar");
+    var counterEl = document.getElementById(id + "-count");
+    var viewerRoot = document.getElementById(id + "-viewer");
 
     var state = {
       path: opts.startPath || "",
@@ -201,115 +164,126 @@
       return state.path.length > state.rootPath.length;
     }
 
-    // ---- toolbar --------------------------------------------------------
+    // ---- Toolbar --------------------------------------------------------
+    /** Rendert Up/Home/Refresh + Breadcrumb + Toggle "show hidden" + Write-Buttons. */
     function renderToolbar() {
-      toolbar.innerHTML = "";
-      var upBtn = h("button", {
+      toolbarRoot.innerHTML = "";
+      var upButton = element("button", {
         type: "button",
         class: "btn btn-sm btn-outline-secondary me-1" + (canGoUp() ? "" : " disabled"),
-        onclick: function () { if (canGoUp()) navigate(parentOf(state.path)); },
-        title: "Up one directory",
-      }, ["⬆ Up"]);
-      var homeBtn = h("button", {
+        onclick: function () { if (canGoUp()) navigate(C.parentOf(state.path)); },
+        title: C.t("ui.up_title"),
+      }, [C.t("ui.up")]);
+
+      var homeButton = element("button", {
         type: "button",
         class: "btn btn-sm btn-outline-secondary me-1" + (state.path === state.rootPath ? " disabled" : ""),
         onclick: function () { navigate(state.rootPath); },
-        title: "Go to root",
+        title: C.t("ui.home_title"),
       }, ["🏠"]);
-      var reloadBtn = h("button", {
+
+      var reloadButton = element("button", {
         type: "button",
         class: "btn btn-sm btn-outline-secondary me-2",
         onclick: function () { load(state.path); },
-        title: "Refresh",
+        title: C.t("ui.refresh_title"),
       }, ["↻"]);
 
-      var breadcrumb = h("nav", { class: "d-inline-block", "aria-label": "breadcrumb" }, [
-        (function () {
-          var ol = h("ol", { class: "breadcrumb mb-0 d-inline-flex" }, []);
+      var breadcrumb = element("nav", { class: "d-inline-block", "aria-label": "breadcrumb" }, [
+        (function buildBreadcrumb() {
+          var list = element("ol", { class: "breadcrumb mb-0 d-inline-flex" }, []);
           var rel = state.path.slice(state.rootPath.length).replace(/^\/+/, "");
-          var parts = rel ? rel.split("/") : [];
-          ol.appendChild(h("li", {
-            class: "breadcrumb-item" + (parts.length ? "" : " active"),
+          var segments = rel ? rel.split("/") : [];
+          list.appendChild(element("li", {
+            class: "breadcrumb-item" + (segments.length ? "" : " active"),
           }, [
-            parts.length
-              ? h("a", { href: "#", onclick: function (e) { e.preventDefault(); navigate(state.rootPath); } }, ["/"])
+            segments.length
+              ? element("a", { href: "#", onclick: function (e) { e.preventDefault(); navigate(state.rootPath); } }, ["/"])
               : "/",
           ]));
-          var cur = state.rootPath;
-          parts.forEach(function (seg, idx) {
-            cur = joinPath(cur, seg);
-            var isLast = idx === parts.length - 1;
-            var target = cur;
-            ol.appendChild(h("li", { class: "breadcrumb-item" + (isLast ? " active" : "") }, [
-              isLast ? seg : h("a", {
+          var cursor = state.rootPath;
+          segments.forEach(function (segment, idx) {
+            cursor = C.joinPath(cursor, segment);
+            var isLast = idx === segments.length - 1;
+            var target = cursor;
+            list.appendChild(element("li", { class: "breadcrumb-item" + (isLast ? " active" : "") }, [
+              isLast ? segment : element("a", {
                 href: "#",
                 onclick: function (e) { e.preventDefault(); navigate(target); },
-              }, [seg]),
+              }, [segment]),
             ]));
           });
-          return ol;
+          return list;
         })(),
       ]);
 
-      var hiddenToggle = h("label", { class: "form-check form-check-inline ms-3 mb-0 align-middle" }, [
-        h("input", {
+      var hiddenToggle = element("label", { class: "form-check form-check-inline ms-3 mb-0 align-middle" }, [
+        element("input", {
           type: "checkbox", class: "form-check-input",
           onchange: function (e) { state.showHidden = e.target.checked; load(state.path); },
         }, []),
-        h("span", { class: "form-check-label small ms-1", text: "Show hidden" }, []),
+        element("span", { class: "form-check-label small ms-1", text: C.t("ui.show_hidden") }, []),
       ]);
       hiddenToggle.querySelector("input").checked = state.showHidden;
 
-      toolbar.appendChild(upBtn);
-      toolbar.appendChild(homeBtn);
-      toolbar.appendChild(reloadBtn);
-      toolbar.appendChild(breadcrumb);
-      toolbar.appendChild(hiddenToggle);
+      toolbarRoot.appendChild(upButton);
+      toolbarRoot.appendChild(homeButton);
+      toolbarRoot.appendChild(reloadButton);
+      toolbarRoot.appendChild(breadcrumb);
+      toolbarRoot.appendChild(hiddenToggle);
 
-      // Write buttons on the right
-      var right = h("span", { class: "ms-auto d-inline-flex gap-1" }, []);
+      // Write-Buttons rechts angeschlagen.
+      var rightGroup = element("span", { class: "ms-auto d-inline-flex gap-1" }, []);
       if (state.perms.allowUpload) {
-        right.appendChild(h("button", {
+        rightGroup.appendChild(element("button", {
           type: "button",
           class: "btn btn-sm btn-primary",
           onclick: openUploadDialog,
-          title: "Upload files to this directory",
-        }, ["⬆ Upload"]));
+          title: C.t("fm.upload_title"),
+        }, [C.t("fm.upload")]));
       }
       if (state.perms.allowMkdir) {
-        right.appendChild(h("button", {
+        rightGroup.appendChild(element("button", {
           type: "button",
           class: "btn btn-sm btn-outline-primary",
           onclick: openMkdirDialog,
-          title: "Create new folder",
-        }, ["+ Folder"]));
+          title: C.t("fm.new_folder_title"),
+        }, [C.t("fm.new_folder")]));
       }
-      if (right.childNodes.length) {
-        toolbar.appendChild(h("span", { class: "flex-grow-1" }, []));
-        toolbar.appendChild(right);
+      if (rightGroup.childNodes.length) {
+        toolbarRoot.appendChild(element("span", { class: "flex-grow-1" }, []));
+        toolbarRoot.appendChild(rightGroup);
       }
     }
 
-    // ---- table ----------------------------------------------------------
+    // ---- Tabelle --------------------------------------------------------
+    /**
+     * Sortiert Ordner immer vor Dateien; danach nach der ausgewählten Spalte.
+     * Kein stabiler Sort (Array.prototype.sort ist in modernen Browsern
+     * stabil, aber wir belasten uns nicht damit).
+     */
     function sortItems(items) {
-      var by = state.sortBy, dir = state.sortDir;
+      var key = state.sortBy;
+      var direction = state.sortDir;
       return items.slice().sort(function (a, b) {
         if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
         var va, vb;
-        if (by === "size") { va = a.size || 0; vb = b.size || 0; }
-        else if (by === "mtime") {
+        if (key === "size") { va = a.size || 0; vb = b.size || 0; }
+        else if (key === "mtime") {
           va = a.mtime ? new Date(a.mtime).getTime() : 0;
           vb = b.mtime ? new Date(b.mtime).getTime() : 0;
-        } else if (by === "type") { va = mediaTypeFor(a); vb = mediaTypeFor(b); }
+        } else if (key === "type") { va = C.mediaTypeFor(a); vb = C.mediaTypeFor(b); }
         else { va = String(a.name).toLowerCase(); vb = String(b.name).toLowerCase(); }
-        if (va < vb) return -1 * dir;
-        if (va > vb) return 1 * dir;
+        if (va < vb) return -1 * direction;
+        if (va > vb) return 1 * direction;
         return 0;
       });
     }
+
+    /** Klickbarer Spaltenkopf: toggelt Richtung bzw. wechselt Sortierspalte. */
     function sortHeader(label, key) {
       var arrow = state.sortBy === key ? (state.sortDir > 0 ? " ▲" : " ▼") : "";
-      return h("th", {
+      return element("th", {
         class: "samba-fm-th",
         style: "cursor:pointer;user-select:none;",
         onclick: function () {
@@ -319,311 +293,326 @@
         },
       }, [label + arrow]);
     }
+
+    /** Baut die Datei-Tabelle inkl. Pagination, wenn `pageSize` > 0 ist. */
     function renderTable(items) {
-      root.innerHTML = "";
+      listRoot.innerHTML = "";
       var showWriteActions = state.perms.allowDelete || state.perms.allowRename;
-      var table = h("table", {
+      var table = element("table", {
         class: "table table-sm table-hover mb-0 samba-fm-table align-middle",
       }, [
-        h("thead", {}, [
-          h("tr", {}, [
-            h("th", { style: "width:2.4rem;" }, []),
-            sortHeader("Filename", "name"),
-            sortHeader("Media type", "type"),
-            sortHeader("Size", "size"),
-            sortHeader("Modified", "mtime"),
-            h("th", { style: "width:" + (showWriteActions ? "18rem" : "14rem") + ";" }, ["Actions"]),
+        element("thead", {}, [
+          element("tr", {}, [
+            element("th", { style: "width:2.4rem;" }, []),
+            sortHeader(C.t("fm.col.filename"), "name"),
+            sortHeader(C.t("fm.col.media_type"), "type"),
+            sortHeader(C.t("fm.col.size"), "size"),
+            sortHeader(C.t("fm.col.modified"), "mtime"),
+            element("th", { style: "width:" + (showWriteActions ? "18rem" : "14rem") + ";" }, [C.t("fm.col.actions")]),
           ]),
         ]),
       ]);
-      var tbody = h("tbody", {}, []);
+      var tbody = element("tbody", {}, []);
       var sorted = sortItems(items);
-      var slice = sorted;
+      var pageSlice = sorted;
       if (state.pageSize > 0) {
         var from = (state.page - 1) * state.pageSize;
-        slice = sorted.slice(from, from + state.pageSize);
+        pageSlice = sorted.slice(from, from + state.pageSize);
       }
 
-      slice.forEach(function (item) {
-        var full = joinPath(state.path, item.name);
+      pageSlice.forEach(function (item) {
+        var fullPath = C.joinPath(state.path, item.name);
         var isDir = item.isDir;
 
-        var nameCell = h("td", {}, [
-          h("a", {
+        var nameCell = element("td", {}, [
+          element("a", {
             href: "#", class: "samba-fm-name",
             onclick: function (e) {
               e.preventDefault();
-              if (isDir) navigate(full); else openFile(item, full);
+              if (isDir) navigate(fullPath); else openFile(item, fullPath);
             },
           }, [item.name]),
         ]);
 
         var actions = [];
         if (isDir) {
-          actions.push(h("button", {
+          actions.push(element("button", {
             type: "button", class: "btn btn-sm btn-outline-secondary me-1",
-            onclick: function () { navigate(full); },
-          }, ["Open"]));
+            onclick: function () { navigate(fullPath); },
+          }, [C.t("fm.open")]));
         } else {
-          actions.push(h("a", {
+          actions.push(element("a", {
             class: "btn btn-sm btn-outline-secondary me-1",
-            href: "/sambafile?path=" + encodeURIComponent(full) + "&disposition=inline",
-            target: "_blank", title: "Open in new tab",
-          }, ["View"]));
-          actions.push(h("a", {
+            href: "/sambafile?path=" + encodeURIComponent(fullPath) + "&disposition=inline",
+            target: "_blank", title: C.t("fm.open_new_tab"),
+          }, [C.t("fm.view")]));
+          actions.push(element("a", {
             class: "btn btn-sm btn-outline-secondary me-1",
-            href: "/sambafile?path=" + encodeURIComponent(full) + "&disposition=attachment",
-            title: "Download",
+            href: "/sambafile?path=" + encodeURIComponent(fullPath) + "&disposition=attachment",
+            title: C.t("fm.download"),
           }, ["⬇"]));
         }
         if (opts.exposeSmbLink) {
-          actions.push(h("a", {
+          actions.push(element("a", {
             class: "btn btn-sm btn-outline-primary me-1",
-            href: "/sambalink?path=" + encodeURIComponent(full),
+            href: "/sambalink?path=" + encodeURIComponent(fullPath),
             target: "_blank",
-            title: "Open in file manager (Nemo/Nautilus/Explorer)",
+            title: C.t("fm.smb_link_title"),
           }, ["↗"]));
         }
         if (state.perms.allowRename) {
-          actions.push(h("button", {
+          actions.push(element("button", {
             type: "button", class: "btn btn-sm btn-outline-secondary me-1",
-            title: "Rename",
-            onclick: function () { openRenameDialog(item, full); },
+            title: C.t("fm.rename_title"),
+            onclick: function () { openRenameDialog(item, fullPath); },
           }, ["✎"]));
         }
         if (state.perms.allowDelete) {
-          actions.push(h("button", {
+          actions.push(element("button", {
             type: "button", class: "btn btn-sm btn-outline-danger",
-            title: "Delete",
-            onclick: function () { confirmDelete(item, full); },
+            title: C.t("fm.delete_title"),
+            onclick: function () { confirmDelete(item, fullPath); },
           }, ["🗑"]));
         }
 
-        tbody.appendChild(h("tr", {}, [
-          h("td", { class: "samba-fm-icon", style: "font-size:1.2rem;" }, [iconFor(item)]),
+        tbody.appendChild(element("tr", {}, [
+          element("td", { class: "samba-fm-icon", style: "font-size:1.2rem;" }, [C.iconFor(item)]),
           nameCell,
-          h("td", { class: "text-muted small" }, [mediaTypeFor(item)]),
-          h("td", { class: "text-muted small" }, [isDir ? "" : fmtSize(item.size)]),
-          h("td", { class: "text-muted small" }, [fmtDate(item.mtime)]),
-          h("td", {}, actions),
+          element("td", { class: "text-muted small" }, [C.mediaTypeFor(item)]),
+          element("td", { class: "text-muted small" }, [isDir ? "" : C.fmtSize(item.size)]),
+          element("td", { class: "text-muted small" }, [C.fmtDate(item.mtime)]),
+          element("td", {}, actions),
         ]));
       });
       table.appendChild(tbody);
-      root.appendChild(table);
+      listRoot.appendChild(table);
 
       if (!items.length) {
-        root.appendChild(h("div", {
+        listRoot.appendChild(element("div", {
           class: "text-muted fst-italic p-3 text-center",
-          text: "(empty directory)",
+          text: C.t("ui.empty"),
         }, []));
       }
 
       if (state.pageSize > 0 && sorted.length > state.pageSize) {
         var totalPages = Math.ceil(sorted.length / state.pageSize);
-        root.appendChild(h("div", {
+        listRoot.appendChild(element("div", {
           class: "d-flex align-items-center justify-content-end p-2 border-top",
         }, [
-          h("span", { class: "text-muted small me-2", text: "Page " + state.page + " / " + totalPages }, []),
-          h("button", {
+          element("span", { class: "text-muted small me-2",
+            text: C.t("ui.page_of", { page: state.page, total: totalPages }) }, []),
+          element("button", {
             type: "button",
             class: "btn btn-sm btn-outline-secondary me-1" + (state.page <= 1 ? " disabled" : ""),
             onclick: function () { if (state.page > 1) { state.page--; render(); } },
-          }, ["‹"]),
-          h("button", {
+          }, [C.t("ui.prev_page")]),
+          element("button", {
             type: "button",
             class: "btn btn-sm btn-outline-secondary" + (state.page >= totalPages ? " disabled" : ""),
             onclick: function () { if (state.page < totalPages) { state.page++; render(); } },
-          }, ["›"]),
+          }, [C.t("ui.next_page")]),
         ]));
       }
     }
+
+    /** Aktualisiert den kleinen "3 folders · 12 files"-Text im Karten-Header. */
     function updateCounter(items) {
-      if (!counter) return;
-      var dirs = items.filter(function (i) { return i.isDir; }).length;
-      var files = items.length - dirs;
-      counter.textContent = dirs + " folders · " + files + " files";
+      if (!counterEl) return;
+      var dirCount = items.filter(function (i) { return i.isDir; }).length;
+      var fileCount = items.length - dirCount;
+      counterEl.textContent = C.t("fm.counter", { dirs: dirCount, files: fileCount });
     }
+
+    /** Toolbar + Tabelle + Counter neu zeichnen. */
     function render() {
       renderToolbar();
       renderTable(state.lastItems);
       updateCounter(state.lastItems);
     }
 
-    // ---- navigation & viewer -------------------------------------------
+    // ---- Navigation & Viewer -------------------------------------------
     function navigate(path) { state.page = 1; load(path); }
-    function openFile(item, full) {
-      if (!viewer) {
-        window.open("/sambafile?path=" + encodeURIComponent(full) + "&disposition=inline", "_blank");
+
+    /** Öffnet eine Datei entweder inline im Viewer oder in einem neuen Tab. */
+    function openFile(item, fullPath) {
+      if (!viewerRoot) {
+        window.open("/sambafile?path=" + encodeURIComponent(fullPath) + "&disposition=inline", "_blank");
         return;
       }
-      if (opts.pdfInline && isViewable(item.name)) {
-        viewer.innerHTML = "";
-        var isImg = /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(item.name);
-        var url = "/sambafile?path=" + encodeURIComponent(full) + "&disposition=inline";
-        var header = h("div", {
+      if (opts.pdfInline && C.isViewable(item.name)) {
+        viewerRoot.innerHTML = "";
+        var isImage = /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(item.name);
+        var streamUrl = "/sambafile?path=" + encodeURIComponent(fullPath) + "&disposition=inline";
+        var header = element("div", {
           class: "samba-fm-viewer-header d-flex align-items-center p-2 border-top",
         }, [
-          h("strong", { text: item.name }, []),
-          h("span", { class: "text-muted small ms-2", text: fmtSize(item.size) }, []),
-          h("button", {
+          element("strong", { text: item.name }, []),
+          element("span", { class: "text-muted small ms-2", text: C.fmtSize(item.size) }, []),
+          element("button", {
             type: "button", class: "btn btn-sm btn-outline-secondary ms-auto",
-            onclick: function () { viewer.innerHTML = ""; },
-          }, ["Close"]),
+            onclick: function () { viewerRoot.innerHTML = ""; },
+          }, [C.t("ui.close")]),
         ]);
-        viewer.appendChild(header);
-        if (isImg) {
-          viewer.appendChild(h("img", {
-            src: url,
+        viewerRoot.appendChild(header);
+        if (isImage) {
+          viewerRoot.appendChild(element("img", {
+            src: streamUrl,
             style: "max-width:100%;max-height:70vh;display:block;margin:0 auto;",
           }, []));
         } else {
-          viewer.appendChild(h("iframe", {
-            src: url, style: "width:100%;height:70vh;border:0;display:block;",
+          viewerRoot.appendChild(element("iframe", {
+            src: streamUrl, style: "width:100%;height:70vh;border:0;display:block;",
           }, []));
         }
       } else {
-        window.open("/sambafile?path=" + encodeURIComponent(full) + "&disposition=inline", "_blank");
+        window.open("/sambafile?path=" + encodeURIComponent(fullPath) + "&disposition=inline", "_blank");
       }
     }
 
-    // ---- write actions --------------------------------------------------
-    function confirmDelete(item, full) {
-      var body = h("div", {}, [
-        h("p", {}, [
-          "Delete ",
-          h("strong", { text: item.name }, []),
-          "?",
+    // ---- Schreib-Aktionen ----------------------------------------------
+    /** Öffnet einen "Wirklich löschen?"-Dialog und ruft /sambadelete auf. */
+    function confirmDelete(item, fullPath) {
+      var body = element("div", {}, [
+        element("p", {}, [
+          C.t("fm.confirm_delete.prompt_prefix"),
+          element("strong", { text: item.name }, []),
+          C.t("fm.confirm_delete.prompt_suffix"),
         ]),
         item.isDir
-          ? h("div", { class: "alert alert-warning small mb-0" }, [
-              "This will only succeed if the directory is empty.",
-            ])
-          : h("div", { class: "text-muted small" }, ["This action cannot be undone."]),
+          ? element("div", { class: "alert alert-warning small mb-0", text: C.t("fm.confirm_delete.dir_hint") }, [])
+          : element("div", { class: "text-muted small", text: C.t("fm.confirm_delete.file_hint") }, []),
       ]);
-      var m = modal("Confirm delete", body, [
-        h("button", {
+      var dialog = openModal(C.t("fm.confirm_delete.title"), body, [
+        element("button", {
           type: "button", class: "btn btn-outline-secondary",
-          onclick: function () { m.close(); },
-        }, ["Cancel"]),
-        h("button", {
+          onclick: function () { dialog.close(); },
+        }, [C.t("ui.cancel")]),
+        element("button", {
           type: "button", class: "btn btn-danger",
           onclick: async function () {
             try {
               await postJson("/sambadelete", {
-                path: full, isDir: item.isDir ? "1" : "0",
+                path: fullPath, isDir: item.isDir ? "1" : "0",
               }, opts.csrfToken);
-              m.close();
-              toast("Deleted " + item.name, "success");
+              dialog.close();
+              toast(C.t("fm.deleted_ok", { name: item.name }), "success");
               load(state.path);
-            } catch (e) {
-              toast("Delete failed: " + e.message, "error");
+            } catch (err) {
+              toast(C.t("fm.deleted_fail", { msg: err.message }), "error");
             }
           },
-        }, ["Delete"]),
+        }, [C.t("fm.delete")]),
       ]);
     }
 
-    function openRenameDialog(item, full) {
-      var input = h("input", {
+    /** Rename-Dialog. Der Server prüft nochmal via sanitizeFilename. */
+    function openRenameDialog(item, fullPath) {
+      var input = element("input", {
         type: "text", class: "form-control", value: item.name,
       }, []);
-      var body = h("div", {}, [
-        h("label", { class: "form-label small text-muted", text: "New name" }, []),
+      var body = element("div", {}, [
+        element("label", { class: "form-label small text-muted", text: C.t("fm.rename.label") }, []),
         input,
-        h("div", { class: "form-text small", text: "Slashes are not allowed. Move by editing folder path? Use the ↗ browse feature instead." }, []),
+        element("div", { class: "form-text small", text: C.t("fm.rename.hint") }, []),
       ]);
-      var m = modal("Rename '" + item.name + "'", body, [
-        h("button", {
+      var dialog = openModal(C.t("fm.rename.title", { name: item.name }), body, [
+        element("button", {
           type: "button", class: "btn btn-outline-secondary",
-          onclick: function () { m.close(); },
-        }, ["Cancel"]),
-        h("button", {
+          onclick: function () { dialog.close(); },
+        }, [C.t("ui.cancel")]),
+        element("button", {
           type: "button", class: "btn btn-primary",
           onclick: async function () {
-            var v = input.value.trim();
-            if (!v || v === item.name) { m.close(); return; }
+            var newName = input.value.trim();
+            if (!newName || newName === item.name) { dialog.close(); return; }
             try {
               await postJson("/sambarename", {
-                from: full, newName: v,
+                from: fullPath, newName: newName,
               }, opts.csrfToken);
-              m.close();
-              toast("Renamed to " + v, "success");
+              dialog.close();
+              toast(C.t("fm.renamed_ok", { name: newName }), "success");
               load(state.path);
-            } catch (e) {
-              toast("Rename failed: " + e.message, "error");
+            } catch (err) {
+              toast(C.t("fm.rename_fail", { msg: err.message }), "error");
             }
           },
-        }, ["Rename"]),
+        }, [C.t("fm.rename")]),
       ]);
       setTimeout(function () { input.focus(); input.select(); }, 20);
     }
 
+    /** Neuen Ordner im aktuellen Pfad anlegen. */
     function openMkdirDialog() {
-      var input = h("input", {
-        type: "text", class: "form-control", placeholder: "New folder name",
+      var input = element("input", {
+        type: "text", class: "form-control", placeholder: C.t("fm.mkdir.placeholder"),
       }, []);
-      var body = h("div", {}, [
-        h("label", { class: "form-label small text-muted", text: "Folder name" }, []),
+      var body = element("div", {}, [
+        element("label", { class: "form-label small text-muted", text: C.t("fm.mkdir.label") }, []),
         input,
       ]);
-      var m = modal("Create folder in " + (state.path || "/"), body, [
-        h("button", {
+      var dialog = openModal(C.t("fm.mkdir.title", { path: state.path || "/" }), body, [
+        element("button", {
           type: "button", class: "btn btn-outline-secondary",
-          onclick: function () { m.close(); },
-        }, ["Cancel"]),
-        h("button", {
+          onclick: function () { dialog.close(); },
+        }, [C.t("ui.cancel")]),
+        element("button", {
           type: "button", class: "btn btn-primary",
           onclick: async function () {
-            var v = input.value.trim();
-            if (!v) return;
+            var name = input.value.trim();
+            if (!name) return;
             try {
               await postJson("/sambamkdir", {
-                path: state.path, name: v,
+                path: state.path, name: name,
               }, opts.csrfToken);
-              m.close();
-              toast("Created folder " + v, "success");
+              dialog.close();
+              toast(C.t("fm.mkdir_ok", { name: name }), "success");
               load(state.path);
-            } catch (e) {
-              toast("Create folder failed: " + e.message, "error");
+            } catch (err) {
+              toast(C.t("fm.mkdir_fail", { msg: err.message }), "error");
             }
           },
-        }, ["Create"]),
+        }, [C.t("fm.mkdir.create")]),
       ]);
       setTimeout(function () { input.focus(); }, 20);
     }
 
+    /**
+     * Upload-Dialog mit Drag-&-Drop-Zone und File-Input. Sendet multipart
+     * mit CSRF-Header. 207 (Multi-Status) mit Teilfehlern wird als Teil-
+     * Erfolg dargestellt.
+     */
     function openUploadDialog() {
       var maxMb = Number(state.perms.maxUploadMb) || 50;
-      var fileInput = h("input", {
+      var fileInput = element("input", {
         type: "file", class: "form-control", multiple: "multiple",
       }, []);
-      var overwriteCb = h("input", { type: "checkbox", class: "form-check-input" }, []);
-      var dropZone = h("div", {
+      var overwriteCheckbox = element("input", { type: "checkbox", class: "form-check-input" }, []);
+      var dropZone = element("div", {
         class: "samba-drop border rounded p-4 text-center text-muted",
-        text: "Drop files here or click to select",
+        text: C.t("fm.upload.dropzone"),
         onclick: function () { fileInput.click(); },
       }, []);
-      var picked = h("div", { class: "samba-picked small mt-2" }, []);
+      var pickedList = element("div", { class: "samba-picked small mt-2" }, []);
 
       function setFiles(fileList) {
         fileInput.__files = Array.prototype.slice.call(fileList);
-        picked.innerHTML = "";
+        pickedList.innerHTML = "";
         if (!fileInput.__files.length) return;
-        var ul = h("ul", { class: "list-unstyled mb-0" }, []);
-        fileInput.__files.forEach(function (f) {
-          ul.appendChild(h("li", { text: f.name + " (" + fmtSize(f.size) + ")" }, []));
+        var ul = element("ul", { class: "list-unstyled mb-0" }, []);
+        fileInput.__files.forEach(function (file) {
+          ul.appendChild(element("li", { text: file.name + " (" + C.fmtSize(file.size) + ")" }, []));
         });
-        picked.appendChild(ul);
+        pickedList.appendChild(ul);
       }
       fileInput.addEventListener("change", function () { setFiles(fileInput.files); });
-      ["dragenter", "dragover"].forEach(function (ev) {
-        dropZone.addEventListener(ev, function (e) {
+      ["dragenter", "dragover"].forEach(function (evt) {
+        dropZone.addEventListener(evt, function (e) {
           e.preventDefault(); e.stopPropagation();
           dropZone.classList.add("samba-drop-active");
         });
       });
-      ["dragleave", "drop"].forEach(function (ev) {
-        dropZone.addEventListener(ev, function (e) {
+      ["dragleave", "drop"].forEach(function (evt) {
+        dropZone.addEventListener(evt, function (e) {
           e.preventDefault(); e.stopPropagation();
           dropZone.classList.remove("samba-drop-active");
         });
@@ -632,100 +621,103 @@
         if (e.dataTransfer && e.dataTransfer.files) setFiles(e.dataTransfer.files);
       });
 
-      var progress = h("div", { class: "samba-upload-progress mt-2" }, []);
-      var body = h("div", {}, [
-        h("div", { class: "small text-muted mb-2" }, [
-          "Uploading to ",
-          h("code", { text: state.path || "/" }, []),
-          ". Max " + maxMb + " MiB per file.",
+      var progress = element("div", { class: "samba-upload-progress mt-2" }, []);
+      var body = element("div", {}, [
+        element("div", { class: "small text-muted mb-2" }, [
+          C.t("fm.upload.into_prefix"),
+          element("code", { text: state.path || "/" }, []),
+          C.t("fm.upload.limit", { mb: maxMb }),
         ]),
         dropZone,
-        h("div", { class: "mt-2" }, [
-          h("label", { class: "form-label small text-muted", text: "…or pick files" }, []),
+        element("div", { class: "mt-2" }, [
+          element("label", { class: "form-label small text-muted", text: C.t("fm.upload.or_pick") }, []),
           fileInput,
         ]),
-        picked,
-        h("label", { class: "form-check mt-2" }, [
-          overwriteCb,
-          h("span", { class: "form-check-label ms-1 small", text: "Overwrite existing files" }, []),
+        pickedList,
+        element("label", { class: "form-check mt-2" }, [
+          overwriteCheckbox,
+          element("span", { class: "form-check-label ms-1 small", text: C.t("fm.upload.overwrite") }, []),
         ]),
         progress,
       ]);
 
-      var uploadBtn;
-      var m = modal("Upload files", body, [
-        h("button", {
+      var uploadButton;
+      var dialog = openModal(C.t("fm.upload.title"), body, [
+        element("button", {
           type: "button", class: "btn btn-outline-secondary",
-          onclick: function () { m.close(); },
-        }, ["Cancel"]),
-        (uploadBtn = h("button", {
+          onclick: function () { dialog.close(); },
+        }, [C.t("ui.cancel")]),
+        (uploadButton = element("button", {
           type: "button", class: "btn btn-primary",
           onclick: async function () {
             var files = fileInput.__files || Array.prototype.slice.call(fileInput.files || []);
-            if (!files.length) { toast("No files selected", "error"); return; }
-            uploadBtn.setAttribute("disabled", "disabled");
+            if (!files.length) { toast(C.t("fm.upload.no_files"), "error"); return; }
+            uploadButton.setAttribute("disabled", "disabled");
             try {
-              var fd = new FormData();
-              fd.append("path", state.path);
-              fd.append("overwrite", overwriteCb.checked ? "1" : "0");
-              files.forEach(function (f) { fd.append("file", f); });
-              progress.innerHTML = "Uploading…";
-              var r = await fetch("/sambaupload", {
+              var formData = new FormData();
+              formData.append("path", state.path);
+              formData.append("overwrite", overwriteCheckbox.checked ? "1" : "0");
+              files.forEach(function (file) { formData.append("file", file); });
+              progress.innerHTML = C.t("fm.upload.uploading");
+              var response = await fetch("/sambaupload", {
                 method: "POST",
                 credentials: "same-origin",
                 headers: { "X-CSRF-Token": opts.csrfToken || "" },
-                body: fd,
+                body: formData,
               });
               var data = null;
-              try { data = await r.json(); } catch (_) { data = null; }
-              if (!r.ok && r.status !== 207) {
-                throw new Error((data && data.error) || ("HTTP " + r.status));
+              try { data = await response.json(); } catch (_) { data = null; }
+              if (!response.ok && response.status !== 207) {
+                throw new Error((data && data.error) || ("HTTP " + response.status));
               }
               var results = (data && data.results) || [];
-              var okCount = results.filter(function (x) { return x.ok; }).length;
-              var failed = results.filter(function (x) { return !x.ok; });
+              var okCount = results.filter(function (item) { return item.ok; }).length;
+              var failed = results.filter(function (item) { return !item.ok; });
               if (failed.length) {
                 progress.innerHTML = "";
-                progress.appendChild(h("div", {
+                progress.appendChild(element("div", {
                   class: "alert alert-warning small mb-0",
                 }, [
-                  "Uploaded " + okCount + " / " + results.length + " files. Failures:",
-                  h("ul", { class: "mb-0" }, failed.map(function (r) {
-                    return h("li", { text: r.name + ": " + r.error }, []);
+                  C.t("fm.upload.partial_summary", { ok: okCount, total: results.length }),
+                  element("ul", { class: "mb-0" }, failed.map(function (item) {
+                    return element("li", { text: item.name + ": " + item.error }, []);
                   })),
                 ]));
-                toast("Some uploads failed", "error");
+                toast(C.t("fm.upload.some_failed"), "error");
               } else {
-                toast("Uploaded " + okCount + " file(s)", "success");
-                m.close();
+                toast(C.t("fm.upload.ok", { n: okCount }), "success");
+                dialog.close();
               }
               load(state.path);
-            } catch (e) {
+            } catch (err) {
               progress.innerHTML = "";
-              progress.appendChild(h("div", {
-                class: "alert alert-danger small mb-0", text: "Upload failed: " + e.message,
+              progress.appendChild(element("div", {
+                class: "alert alert-danger small mb-0",
+                text: C.t("fm.upload.failed", { msg: err.message }),
               }, []));
-              toast("Upload failed", "error");
+              toast(C.t("fm.upload.failed_short"), "error");
             } finally {
-              uploadBtn.removeAttribute("disabled");
+              uploadButton.removeAttribute("disabled");
             }
           },
-        }, ["Upload"])),
+        }, [C.t("fm.upload.button")])),
       ]);
     }
 
-    // ---- data ------------------------------------------------------------
+    // ---- Datenzugriff --------------------------------------------------
+    /** Lädt den aktuellen Pfad neu, aktualisiert `state` und rendert. */
     async function load(path) {
       state.path = path;
-      root.innerHTML = '<div class="text-muted p-3">Loading…</div>';
+      listRoot.innerHTML = '<div class="text-muted p-3">' + C.t("ui.loading") + "</div>";
       try {
-        var data = await fetchDir(path, state.showHidden);
+        var data = await fetchDirectory(path, state.showHidden);
         state.lastItems = data.items || [];
         state.perms = data.perms || {};
         render();
-      } catch (e) {
-        root.innerHTML =
-          '<div class="alert alert-danger m-2">Samba: ' + (e.message || String(e)) + "</div>";
+      } catch (err) {
+        listRoot.innerHTML =
+          '<div class="alert alert-danger m-2">' +
+          C.t("tree.samba_prefix") + (err.message || String(err)) + "</div>";
         renderToolbar();
       }
     }

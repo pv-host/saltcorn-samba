@@ -1,11 +1,11 @@
 {
   "name": "saltcorn-samba",
-  "version": "0.4.15",
+  "version": "0.4.16",
   "description": "Saltcorn plugin: browse, upload, rename and delete files on a Samba/CIFS share via SMB 3.1.1 (AES-CMAC signing, optional encryption). File-manager view, directory tree, inline PDF viewer, external-app open (smb://).",
   "main": "index.js",
   "scripts": {
     "test": "node test/sanitize.test.js",
-    "lint": "node --check index.js && node --check smb-client.js && node --check readdir-compat.js && node --check tree-view.js && node --check filemanager-view.js && node --check pdf-view.js && node --check public/samba-tree.js && node --check public/samba-filemanager.js",
+    "lint": "node --check index.js && node --check smb-client.js && node --check readdir-compat.js && node --check tree-view.js && node --check filemanager-view.js && node --check pdf-view.js && node --check i18n.js && node --check public/samba-tree.js && node --check public/samba-filemanager.js && node --check public/samba-common.js",
     "prepublishOnly": "npm run lint && npm test"
   },
   "keywords": [
@@ -43,6 +43,8 @@
     "tree-view.js",
     "filemanager-view.js",
     "pdf-view.js",
+    "i18n.js",
+    "i18n/",
     "public/",
     "tools/",
     "README.md",

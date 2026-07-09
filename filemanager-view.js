@@ -18,6 +18,7 @@ const Field = require("@saltcorn/data/models/field");
 const Table = require("@saltcorn/data/models/table");
 
 const { sanitizeRelativePath } = require("./smb-client");
+const { catalogFor, resolveLocaleFromReq } = require("./i18n");
 
 // ---------------------------------------------------------------------------
 // Configuration workflow
@@ -170,8 +171,21 @@ function computeStartPath(configuration, row) {
 // Shell renderer
 // ---------------------------------------------------------------------------
 
-function renderShell(startPath, configuration, pluginVersion, csrfToken) {
+/**
+ * Serialisiert den i18n-Katalog inline in die Seite. Alternative w\u00e4re ein
+ * zus\u00e4tzlicher HTTP-Roundtrip auf /samba-i18n.json — inline spart einen
+ * Request und rendert die Oberfl\u00e4che ohne Aufblitzen englischer Keys.
+ * `</script>` wird escaped, damit das JSON-Blob den HTML-Parser nicht t\u00f6tet.
+ */
+function serialiseCatalog(catalog) {
+  return JSON.stringify(catalog || {}).replace(/</g, "\\u003c");
+}
+
+function renderShell(startPath, configuration, pluginVersion, csrfToken, locale, catalog) {
   const id = "samba-fm-" + Math.random().toString(36).slice(2, 10);
+  // Panel-Titel: wenn der User keinen eigenen Titel gesetzt hat, greift die
+  // \u00fcbersetzte Default-Bezeichnung aus dem i18n-Katalog.
+  const defaultTitle = (catalog && catalog["fm.title_default"]) || "Samba files";
   const opts = {
     startPath,
     showHidden: !!configuration.show_hidden,
@@ -179,10 +193,16 @@ function renderShell(startPath, configuration, pluginVersion, csrfToken) {
     pdfInline: configuration.pdf_inline !== false,
     exposeSmbLink: configuration.expose_smb_link !== false,
     pageSize: Number(configuration.page_size) || 0,
-    title: configuration.title || "Samba files",
+    title: configuration.title || defaultTitle,
     csrfToken: csrfToken || "",
+    locale: locale || "en",
   };
 
+  // Zwei-Stufen-Bootstrap:
+  //   1. samba-common.js laden (SambaCommon global) und Katalog setzen
+  //   2. samba-filemanager.js laden und mounten
+  // Wenn beide Skripte bereits geladen sind, wird nur remounted.
+  const catalogJson = serialiseCatalog(catalog);
   return (
     div(
       { class: "samba-fm card" },
@@ -201,14 +221,23 @@ function renderShell(startPath, configuration, pluginVersion, csrfToken) {
     ) +
     script(
       `(function(){
-         function boot(){window.saltcornSambaMountFM && window.saltcornSambaMountFM(${JSON.stringify(
+         var CATALOG=${catalogJson};
+         function applyCatalog(){ if(window.SambaCommon && window.SambaCommon.setCatalog) window.SambaCommon.setCatalog(CATALOG); }
+         function mount(){window.saltcornSambaMountFM && window.saltcornSambaMountFM(${JSON.stringify(
            id
          )}, ${JSON.stringify(opts)});}
-         if(window.saltcornSambaMountFM){boot();return;}
-         var s=document.createElement('script');
-         s.src='/plugins/public/saltcorn-samba@${pluginVersion}/samba-filemanager.js';
-         s.onload=boot;
-         document.head.appendChild(s);
+         function loadFM(){
+           if(window.saltcornSambaMountFM){ mount(); return; }
+           var s=document.createElement('script');
+           s.src='/plugins/public/saltcorn-samba@${pluginVersion}/samba-filemanager.js';
+           s.onload=mount;
+           document.head.appendChild(s);
+         }
+         if(window.SambaCommon){ applyCatalog(); loadFM(); return; }
+         var c=document.createElement('script');
+         c.src='/plugins/public/saltcorn-samba@${pluginVersion}/samba-common.js';
+         c.onload=function(){ applyCatalog(); loadFM(); };
+         document.head.appendChild(c);
        })();`
     )
   );
@@ -230,9 +259,21 @@ function extractCsrf(extra) {
   return "";
 }
 
+/**
+ * Liest die vom Nutzer bevorzugte Sprache aus dem Request (Saltcorn setzt
+ * das aus Login-Cookie / Accept-Language) und liefert Locale + Katalog. Bei
+ * Ausfall greift `en` als Notnagel – hardgecodete Strings werden nie leer.
+ */
+function resolveLocaleAndCatalog(extra) {
+  const req = extra && extra.req;
+  const locale = resolveLocaleFromReq(req);
+  return { locale, catalog: catalogFor(locale) };
+}
+
 async function run(table_id, viewname, configuration, state, extra) {
   const pluginVersion = configuration.__pluginVersion || "0.3.0";
   const csrf = extractCsrf(extra);
+  const { locale, catalog } = resolveLocaleAndCatalog(extra);
   let row = extra && extra.row;
   if (!row && configuration.mode === "from_field" && table_id) {
     const table = await Table.findOne({ id: table_id });
@@ -250,12 +291,13 @@ async function run(table_id, viewname, configuration, state, extra) {
   } catch (e) {
     return div({ class: "alert alert-danger" }, "Samba file manager: " + e.message);
   }
-  return renderShell(startPath, configuration, pluginVersion, csrf);
+  return renderShell(startPath, configuration, pluginVersion, csrf, locale, catalog);
 }
 
 async function runMany(table_id, viewname, configuration, state, extra) {
   const pluginVersion = configuration.__pluginVersion || "0.3.0";
   const csrf = extractCsrf(extra);
+  const { locale, catalog } = resolveLocaleAndCatalog(extra);
   const rows = (extra && extra.rows) || [];
   return rows.map((row) => {
     let startPath = "";
@@ -265,7 +307,7 @@ async function runMany(table_id, viewname, configuration, state, extra) {
       startPath = "";
     }
     return {
-      html: renderShell(startPath, configuration, pluginVersion, csrf),
+      html: renderShell(startPath, configuration, pluginVersion, csrf, locale, catalog),
       row,
     };
   });
