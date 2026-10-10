@@ -4,7 +4,6 @@
     "locale": "de",
     "note": "Übersetzungskatalog für saltcorn-samba. Punkt-Notation gruppiert nach Bereich."
   },
-
   "ui.loading": "Lädt …",
   "ui.close": "Schließen",
   "ui.cancel": "Abbrechen",
@@ -21,7 +20,6 @@
   "ui.page_of": "Seite {page} / {total}",
   "ui.prev_page": "‹",
   "ui.next_page": "›",
-
   "fm.title_default": "Samba-Dateien",
   "fm.col.filename": "Dateiname",
   "fm.col.media_type": "MIME-Typ",
@@ -42,7 +40,6 @@
   "fm.upload_title": "Dateien in dieses Verzeichnis hochladen",
   "fm.new_folder": "+ Ordner",
   "fm.new_folder_title": "Neuen Ordner anlegen",
-
   "fm.confirm_delete.title": "Löschen bestätigen",
   "fm.confirm_delete.prompt_prefix": "„",
   "fm.confirm_delete.prompt_suffix": "\" wirklich löschen?",
@@ -50,20 +47,17 @@
   "fm.confirm_delete.file_hint": "Dieser Vorgang kann nicht rückgängig gemacht werden.",
   "fm.deleted_ok": "„{name}\" gelöscht",
   "fm.deleted_fail": "Löschen fehlgeschlagen: {msg}",
-
   "fm.rename.title": "„{name}\" umbenennen",
   "fm.rename.label": "Neuer Name",
   "fm.rename.hint": "Slashes sind nicht erlaubt. Zum Verschieben stattdessen die ↗-Funktion nutzen.",
   "fm.renamed_ok": "Umbenannt in „{name}\"",
   "fm.rename_fail": "Umbenennen fehlgeschlagen: {msg}",
-
   "fm.mkdir.title": "Ordner anlegen in {path}",
   "fm.mkdir.label": "Ordnername",
   "fm.mkdir.placeholder": "Neuer Ordnername",
   "fm.mkdir.create": "Anlegen",
   "fm.mkdir_ok": "Ordner „{name}\" angelegt",
   "fm.mkdir_fail": "Ordner anlegen fehlgeschlagen: {msg}",
-
   "fm.upload.title": "Dateien hochladen",
   "fm.upload.dropzone": "Dateien hierher ziehen oder klicken zum Auswählen",
   "fm.upload.into_prefix": "Ziel: ",
@@ -78,16 +72,15 @@
   "fm.upload.some_failed": "Einige Uploads fehlgeschlagen",
   "fm.upload.failed": "Upload fehlgeschlagen: {msg}",
   "fm.upload.failed_short": "Upload fehlgeschlagen",
-
   "tree.open_in_fm": "Im Datei-Manager öffnen",
   "tree.open_in_fm_title": "Im Datei-Manager öffnen",
   "tree.error_prefix": "Fehler: ",
   "tree.samba_prefix": "Samba: ",
   "tree.open_new_tab": "In neuem Tab öffnen",
-
   "pdf.download": "Herunterladen",
   "pdf.open_in_fm": "Im Datei-Manager öffnen",
   "pdf.open_in_fm_title": "In Nemo/Nautilus/Explorer öffnen",
   "pdf.open_new_tab": "In neuem Tab öffnen",
-  "pdf.empty": "—"
+  "pdf.empty": "—",
+  "ui.view_expired": "Diese Ansicht ist abgelaufen oder nicht mehr gültig. Bitte die Seite neu laden."
 }

@@ -22,6 +22,11 @@
 
 const fs = require("fs");
 const path = require("path");
+// Gemeinsamer Kern (interpolate + translate) – identische Datei, die auch
+// im Browser via <script>-Tag als window.SambaI18nRuntime geladen wird.
+// Sie liegt unter public/ damit sie beim Plugin-Publish ausgeliefert und
+// vom Browser über /plugins/public/... erreichbar ist.
+const runtime = require("./public/samba-i18n-runtime");
 
 const CATALOG_DIR = path.join(__dirname, "i18n");
 const DEFAULT_LOCALE = "en";
@@ -90,36 +95,22 @@ function resolveLocaleFromReq(req, explicit) {
 }
 
 /**
- * Substitute {placeholder} tokens in the message. Missing values render as "".
- */
-function interpolate(msg, params) {
-  if (!params) return msg;
-  return String(msg).replace(/\{(\w+)\}/g, (_, key) =>
-    Object.prototype.hasOwnProperty.call(params, key) ? String(params[key]) : ""
-  );
-}
-
-/**
  * Translate a single key. Falls back to English, then to the key itself so
- * a missing translation never breaks the UI.
+ * a missing translation never breaks the UI. Die eigentliche Lookup- und
+ * Placeholder-Logik lebt in `i18n-runtime.js` und wird identisch auch im
+ * Browser benutzt – hier bauen wir nur die Katalog-Kaskade auf.
  *
  *   t("fm.upload.button", { locale: "de" })                → "Hochladen"
- *   t("fm.deleted_ok", { locale: "de", name: "foo.txt" }) → "„foo.txt\" gelöscht"
+ *   t("fm.deleted_ok", { locale: "de", name: "foo.txt" }) → „foo.txt\" gelöscht
  */
 function t(key, params) {
   const opts = params || {};
   const locale = normaliseLocale(opts.locale);
-  const primary = loadCatalog(locale);
-  if (Object.prototype.hasOwnProperty.call(primary, key)) {
-    return interpolate(primary[key], opts);
-  }
-  if (locale !== DEFAULT_LOCALE) {
-    const fallback = loadCatalog(DEFAULT_LOCALE);
-    if (Object.prototype.hasOwnProperty.call(fallback, key)) {
-      return interpolate(fallback[key], opts);
-    }
-  }
-  return key;
+  const catalogChain =
+    locale === DEFAULT_LOCALE
+      ? [loadCatalog(DEFAULT_LOCALE)]
+      : [loadCatalog(locale), loadCatalog(DEFAULT_LOCALE)];
+  return runtime.translate(key, opts, catalogChain);
 }
 
 /**

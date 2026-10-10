@@ -6,6 +6,8 @@
  *                                 (früher in beiden JS-Dateien dupliziert)
  *   - extOf(name)               : Extension in lower-case, ohne Punkt
  *   - joinPath(a, b), parentOf  : simple posix-artige Pfad-Helfer
+ *   - apiUrl(route, params, view): URL zu einer Plugin-Route inkl. View-Token
+ *   - viewFetch(view, url, init) : fetch mit View-Token-Header + Token-Verlängerung
  *   - fmtSize(bytes), fmtDate(v): menschenlesbare Formatierung
  *   - isViewable(name)          : PDFs, Bilder, Text-artige Dateien
  *   - mediaTypeFor(item)        : grober MIME-Typ (auch nur für File-Manager)
@@ -23,26 +25,28 @@
   "use strict";
 
   // ---- i18n-State ---------------------------------------------------------
+  // Der eigentliche Katalog-Lookup und die Placeholder-Interpolation stammen
+  // aus i18n-runtime.js – der GLEICHE Kern, den auch der Server benutzt.
+  // Damit gibt es t()/interpolate() nur noch an einer Stelle.
+  var runtime = window.SambaI18nRuntime;
+  if (!runtime) {
+    // Notnagel: falls samba-i18n-runtime.js nicht (oder noch nicht) geladen
+    // wurde, liefern wir einen minimalen Kompatibilitäts-Stub. Praktisch
+    // sollte das nie greifen, weil die View-Shell den Runtime davor lädt.
+    runtime = {
+      translate: function (key) { return key; },
+      interpolate: function (msg) { return msg; },
+    };
+  }
   var catalog = {};
 
   function setCatalog(obj) {
     catalog = obj && typeof obj === "object" ? obj : {};
   }
 
-  /** Löst {name}-Platzhalter im Muster auf. */
-  function interpolate(msg, params) {
-    if (!params) return msg;
-    return String(msg).replace(/\{(\w+)\}/g, function (_, k) {
-      return Object.prototype.hasOwnProperty.call(params, k) ? String(params[k]) : "";
-    });
-  }
-
-  /** Übersetzt einen Key. Fällt auf den Key selbst zurück, falls kein Eintrag. */
+  /** Übersetzt einen Key. Delegiert an den gemeinsamen Runtime-Kern. */
   function t(key, params) {
-    if (Object.prototype.hasOwnProperty.call(catalog, key)) {
-      return interpolate(catalog[key], params);
-    }
-    return interpolate(key, params);
+    return runtime.translate(key, params, [catalog]);
   }
 
   /**
@@ -155,6 +159,77 @@
     return i < 0 ? "" : p.slice(0, i);
   }
 
+  /**
+   * Baut die URL zu einer Plugin-Route. `params` wird als Query-String
+   * angehängt (undefined/null-Werte entfallen). `view` ist das opts-Objekt
+   * der View-Instanz: dessen Verbindung (`conn`) und – für Links, iframes
+   * und Bilder, die keinen Header senden können – das signierte View-Token
+   * (`vt`) werden angehängt. Einzige Stelle im Browser, an der Plugin-URLs
+   * zusammengesetzt werden.
+   *
+   *   apiUrl("/sambafile", { path: "a/b.pdf", disposition: "inline" }, opts)
+   *   → "/sambafile?path=a%2Fb.pdf&disposition=inline&conn=archiv&vt=…"
+   */
+  function apiUrl(route, params, view) {
+    var parts = [];
+    var p = params || {};
+    var v = view || {};
+    Object.keys(p).forEach(function (k) {
+      if (p[k] === undefined || p[k] === null) return;
+      parts.push(encodeURIComponent(k) + "=" + encodeURIComponent(String(p[k])));
+    });
+    if (v.connection && v.connection !== "default") parts.push("conn=" + encodeURIComponent(v.connection));
+    if (v.viewToken) parts.push("vt=" + encodeURIComponent(v.viewToken));
+    return route + (parts.length ? "?" + parts.join("&") : "");
+  }
+
+  /** Fehlercodes, bei denen nur ein Neuladen der Seite hilft. */
+  var RELOAD_CODES = { VIEW_TOKEN_EXPIRED: 1, VIEW_TOKEN_MISSING: 1, VIEW_TOKEN_INVALID: 1, VIEW_TOKEN_USER: 1 };
+
+  /**
+   * fetch() für Plugin-Routen einer View-Instanz:
+   *   - sendet das View-Token im Header `X-Samba-View-Token`,
+   *   - übernimmt ein vom Server verlängertes Token aus der Antwort,
+   *   - liefert bei Fehlern ein Error-Objekt mit `.status`, `.code`, `.body`
+   *     und einer übersetzten Meldung für abgelaufene Ansichten.
+   * Rückgabe: geparstes JSON (oder `{}` bei leerer Antwort).
+   *
+   * @param {object} view   opts der View (viewToken, csrfToken)
+   * @param {string} url
+   * @param {object} [init] fetch-Optionen; `allowStatus` = zusätzlich
+   *                        akzeptierte Statuscodes (z. B. [207])
+   */
+  async function viewFetch(view, url, init) {
+    var v = view || {};
+    var i = init || {};
+    var headers = Object.assign({}, i.headers || {});
+    if (v.viewToken) headers["X-Samba-View-Token"] = v.viewToken;
+    if ((i.method || "GET").toUpperCase() !== "GET" && v.csrfToken) headers["X-CSRF-Token"] = v.csrfToken;
+    var response = await fetch(url, {
+      method: i.method || "GET",
+      credentials: "same-origin",
+      headers: headers,
+      body: i.body,
+    });
+    var renewed = response.headers.get("X-Samba-View-Token");
+    if (renewed) v.viewToken = renewed;
+    var data = null;
+    try { data = await response.json(); } catch (_) { data = null; }
+    var allowed = i.allowStatus || [];
+    if (!response.ok && allowed.indexOf(response.status) < 0) {
+      var code = data && data.code;
+      var msg = RELOAD_CODES[code]
+        ? t("ui.view_expired")
+        : (data && data.error) || ("HTTP " + response.status);
+      var err = new Error(msg);
+      err.status = response.status;
+      err.code = code;
+      err.body = data;
+      throw err;
+    }
+    return data || {};
+  }
+
   // ---- Export -------------------------------------------------------------
   window.SambaCommon = {
     // i18n
@@ -171,5 +246,7 @@
     fmtDate: fmtDate,
     joinPath: joinPath,
     parentOf: parentOf,
+    apiUrl: apiUrl,
+    viewFetch: viewFetch,
   };
 })();

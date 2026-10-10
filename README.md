@@ -1,13 +1,14 @@
 # saltcorn-samba
 
-Ein Saltcorn-Plugin für den Zugriff auf einen **Samba-/CIFS-Server (SMB2/3)**
-direkt aus dem Browser — ohne Mount, ohne `smbclient` im Container.
+Ein Saltcorn-Plugin für den Zugriff auf einen oder **mehrere Samba-/CIFS-Server
+(SMB2/3)** direkt aus dem Browser — ohne Mount, ohne `smbclient` im Container.
 
 Features:
 
 - 📂 **`SambaFileManager`-View** — Datei-Manager wie *Einstellungen → Dateien* in Saltcorn: Tabelle mit Symbol, Name, MIME-Typ, Größe, Änderungsdatum und Aktionen. Breadcrumb-Navigation, Up-/Home-/Refresh-Button, Sortierung per Spaltenklick, Pagination, Anzeige versteckter Dateien optional.
 - ⬆️ **Upload / Neuer Ordner / Umbenennen / Löschen** — optional aktivierbar,
   Multi-File-Upload mit Drag-&-Drop, Toast-Feedback, Rollen-Gate.
+- 🔀 **Mehrere Verbindungen** (ab 0.5.0) — beliebig viele Server/Freigaben pro Saltcorn-Instanz; jede View wählt ihre Verbindung, optional pro Datensatz. Siehe [Mehrere Verbindungen](#mehrere-verbindungen).
 - 🌳 **`SambaTree`-View** — Lazy-loading Verzeichnisbaum, ideal zum Einbetten in Show-Views.
 - 📄 **Inline-PDF-/Bild-Anzeige** direkt im `SambaFileManager` (Klick auf eine Datei), plus Download- und externe-App-Buttons.
 - 🚀 **`smb://`-Links** — Öffnet Dateien und Ordner direkt in Nemo, Nautilus, Dolphin (Linux) oder Explorer (Windows).
@@ -16,6 +17,58 @@ Features:
 - 🐳 **Docker-freundlich** — direkt per SMB2/3-Protokoll, keine System-Binaries nötig.
 
 > **Voraussetzungen:** **Node.js ≥ 20** (wegen der ESM-basierten [`smb3-client`](https://www.npmjs.com/package/smb3-client) Library, die intern per dynamic `import()` geladen wird). Saltcorn 0.9+ wird unterstützt.
+
+---
+
+## Was ist neu in 0.6.0 (Sicherheit)
+
+- **View-Bindung:** Jede Samba-View erhält beim Anzeigen ein signiertes
+  Token. Verbindung, Startordner, Benutzer und erlaubte Aktionen sind damit
+  an genau diese View gebunden. Ein Nutzer kann über manipulierte Requests
+  weder eine andere Verbindung noch einen Ordner außerhalb „seiner“ View
+  ansprechen. Details: [View-Bindung](#view-bindung).
+- **Zeilenrechte:** Im Modus *Pfad aus Feld* lädt die View den Datensatz
+  jetzt mit Saltcorns Tabellenrechten (Eigentümer, Leserolle). Fehlt der
+  Datensatz oder der Ordnerwert, zeigt die View eine Meldung statt – wie
+  bisher – still den übergeordneten Ordner (`view_base_path`) aller
+  Datensätze.
+- **Sichere Dateiauslieferung:** HTML, SVG und andere aktive Inhalte vom
+  Share werden nur noch in einer CSP-Sandbox angezeigt (kein JavaScript auf
+  der Saltcorn-Domain), Textdateien immer als `text/plain`, dazu `nosniff`
+  und `Referrer-Policy: no-referrer`.
+- **Verbindungstest abgesichert:** Die Route `/sambatest` ließ sich bis 0.5.0
+  ohne Anmeldung nutzen, wenn ein passender `Referer`-Header mitgeschickt
+  wurde (frei fälschbar). Diese Ausnahme und der CSRF-Verzicht sind entfernt.
+- Neue View-Option *Nur lesen (diese View)* im File-Manager.
+
+⚠️ **Nach dem Update:** Offene Browser-Tabs mit Samba-Views neu laden.
+Eigene Skripte, die `/sambadir`, `/sambafile` … direkt aufrufen, brauchen
+ein View-Token – oder vorübergehend den Modus *Zugriff nur über Views* =
+`optional` (Schritt 2).
+
+---
+
+## Was ist neu in 0.5.0
+
+- **Bugfix Upload:** Hochgeladene Dateien kamen als **0-Byte-Dateien** auf dem
+  Share an, obwohl „OK“ gemeldet wurde (Saltcorn legt Uploads als Temp-Datei
+  ab, das Plugin las den leeren Speicherpuffer). Jetzt wird die Temp-Datei
+  gelesen, die Größe nach dem Schreiben gegengeprüft und die Temp-Datei
+  gelöscht.
+- **Bugfix Ordner anlegen / Upload → 403:** Buttons wurden auch angezeigt,
+  wenn die Aktion in Schritt 2 nicht aktiviert war; der Server lehnte dann
+  ab. Sichtbarkeit und Prüfung nutzen jetzt dieselbe Funktion.
+  ⚠️ **Prüfen Sie nach dem Update Schritt 2:** Upload, Löschen, Umbenennen
+  und Ordner anlegen müssen dort angehakt sein, sonst erscheinen die Buttons
+  nicht mehr.
+- **Neu: mehrere Verbindungen** — Konfigurationsschritt 3 *Weitere
+  Verbindungen*; Views erhalten die Felder *Samba-Verbindung* und
+  *Verbindung aus Feld*. Bestehende Konfigurationen laufen unverändert als
+  Verbindung `default` weiter.
+- Verständliche deutsche Fehlermeldungen für SMB-Statuscodes
+  (z. B. `STATUS_ACCESS_DENIED` → „Zugriff verweigert …“).
+
+Konzept und Begründung: [docs/KONZEPT-mehrere-verbindungen.md](docs/KONZEPT-mehrere-verbindungen.md).
 
 ---
 
@@ -113,9 +166,9 @@ docker exec -it <saltcorn-container> \
 ## Konfiguration
 
 Nach der Installation unter *Einstellungen → Plugins → saltcorn-samba →
-Configure* ausfüllen. Die Konfiguration ist zweistufig:
+Configure* ausfüllen. Die Konfiguration hat drei Schritte:
 
-### Schritt 1 — *Samba-Server*
+### Schritt 1 — *Samba-Server (Standardverbindung „default“)*
 
 | Feld | Beispiel | Beschreibung |
 |---|---|---|
@@ -151,6 +204,26 @@ Configure* ausfüllen. Die Konfiguration ist zweistufig:
 - Auf dem Samba-Server einen separaten Nutzer mit passenden Rechten anlegen
   (read-only wenn nur gelesen werden soll).
 - Zusätzlich mit *Basispfad* den Zugriff auf ein Unterverzeichnis begrenzen.
+
+### Schritt 3 — *Weitere Verbindungen* (optional)
+
+Über **„Hinzufügen“** legen Sie beliebig viele zusätzliche Verbindungen an.
+Jede Zeile enthält dieselben Felder wie Schritt 1 plus:
+
+| Feld | Beschreibung |
+|---|---|
+| **Kennung** | Eindeutiger technischer Name, z. B. `archiv`, `nas-standort2`. Erlaubt: Buchstaben, Ziffern, `_ - .`, max. 40 Zeichen. `default` ist reserviert. |
+| **Anzeigename** | Optional; erscheint als Badge im Kopf der View. |
+| **Nur lesen** | Sperrt alle Schreibaktionen dieser Verbindung – unabhängig von Rollen. |
+| **Mindestrolle Lesen / Schreiben** | Optional; leer = globaler Wert aus Schritt 2. |
+
+Die Schalter Upload/Löschen/Umbenennen/Ordner anlegen, das Größenlimit und
+die Endungs-Sperrliste aus Schritt 2 gelten für alle Verbindungen.
+**Zugangsdaten werden nicht von `default` geerbt** – jede Verbindung braucht
+eigene. Fehlerhafte Einträge (doppelte Kennung, fehlender Server …) werden
+ignoriert und oben im Schritt 3 aufgelistet; die übrigen Verbindungen
+funktionieren weiter. Mit **„Test-Buttons für alle Verbindungen anzeigen“**
+lässt sich jede Verbindung vor dem Speichern prüfen.
 
 ### Verbindung testen
 
@@ -219,6 +292,25 @@ Felder:   name (String), akte_dir (String, z. B. "kunde_42/2026")
 Dann eine Show-View von `kunden` bauen und die `SambaFileManager`-View mit
 Row-Modus = `from_field`, Feld = `akte_dir` einbetten.
 
+### Mehrere Verbindungen
+
+Beide Views (`SambaFileManager`, `SambaTree`) haben zwei zusätzliche
+Konfigurationsfelder:
+
+- **Samba-Verbindung** – Auswahl aus `default` und den Kennungen aus Schritt 3.
+- **Verbindung aus Feld** (optional) – Textfeld der Tabelle, dessen Wert die
+  Kennung liefert. Beispiel: Tabelle *Standorte* mit Spalte `fileserver`
+  (`hq`, `werk2`, …) – die Show-View eines Standorts zeigt automatisch dessen
+  Fileserver. Ist das Feld leer, gilt die statisch gewählte Verbindung.
+
+Die Verbindung wird beim Anzeigen der View serverseitig aufgelöst und im
+View-Token festgeschrieben (siehe [View-Bindung](#view-bindung)). Ist die
+Kennung unbekannt, zeigt die View „Unbekannte Samba-Verbindung …“.
+
+**Typische Einsätze:** getrennte Server für Mandanten oder Standorte,
+Produktiv- und Archiv-NAS, eine schreibgeschützte Verbindung auf dieselbe
+Freigabe (Option *Nur lesen*) für Leser-Views.
+
 ### View: `SambaTree`
 
 Kompaktere Alternative – lazy-loading Baum, ideal in einer Sidebar oder
@@ -259,18 +351,31 @@ Zwischenseite mit sichtbarem Klick-Link.
 
 | Methode + URL | Parameter | Zweck |
 |---|---|---|
-| `GET /sambadir`  | `path`, `show_hidden` | JSON-Verzeichnisliste + `perms` |
-| `GET /sambafile` | `path`, `disposition=inline\|attachment` | Datei-Stream |
-| `GET /sambalink` | `path` | HTML-Seite mit `smb://`-Anker |
+| `GET /sambadir`  | `path`, `show_hidden`, `conn`, `vt` | JSON-Verzeichnisliste + `perms` |
+| `GET /sambafile` | `path`, `disposition=inline\|attachment`, `conn`, `vt` | Datei-Stream |
+| `GET /sambalink` | `path`, `conn`, `vt` | HTML-Seite mit `smb://`-Anker |
+
+Das View-Token wird als Header `X-Samba-View-Token` (fetch) oder als
+Parameter `vt` (Links) übergeben. Ohne Token → `401 VIEW_TOKEN_MISSING`
+(Modus `required`), abgelaufen → `401 VIEW_TOKEN_EXPIRED`, manipuliert →
+`401 VIEW_TOKEN_INVALID`, anderer Benutzer → `403 VIEW_TOKEN_USER`, Pfad
+außerhalb der View → `403 VIEW_SCOPE`, View nur lesend → `403 VIEW_READ_ONLY`.
+Eine verlängerte Fassung des Tokens liefert `/sambadir` im Antwort-Header
+`X-Samba-View-Token`.
 
 ### Schreiben (POST, Rolle ≥ `min_role_write`, CSRF-Token erforderlich)
 
 | Methode + URL | Body / Form | Zweck |
 |---|---|---|
-| `POST /sambaupload` | `multipart/form-data`: `dir`, `file` (n-fach), `overwrite`, `_csrf` | Dateien hochladen |
-| `POST /sambadelete` | JSON: `path`, `_csrf` | Datei/Ordner (rekursiv) löschen |
-| `POST /sambarename` | JSON: `path`, `new_name`, `_csrf` | Umbenennen |
-| `POST /sambamkdir`  | JSON: `dir`, `name`, `_csrf` | Neuen Ordner anlegen |
+| `POST /sambaupload` | `multipart/form-data`: `conn`, `path`, `file` (n-fach), `overwrite` | Dateien hochladen |
+| `POST /sambadelete` | JSON: `conn`, `path`, `isDir` | Datei/Ordner (rekursiv) löschen |
+| `POST /sambarename` | JSON: `conn`, `from`, `newName` | Umbenennen |
+| `POST /sambamkdir`  | JSON: `conn`, `path`, `name` | Neuen Ordner anlegen |
+
+`conn` ist optional (fehlt er, gilt `default`). Unbekannte Kennung → `404`,
+ungültige Kennung → `400`, fehlende Rolle / deaktivierte Aktion /
+*Nur lesen* → `403` mit deutscher Klartext-Meldung. Uploads antworten mit
+`207`, wenn einzelne Dateien scheitern (Details in `results[]`).
 
 Das CSRF-Token wird von Saltcorn per `req.csrfToken()` erzeugt. Der Client
 übergibt es entweder als Feld `_csrf` im Body oder als HTTP-Header
@@ -302,7 +407,56 @@ führende/abschließende Punkte oder Windows-Reserved-Names enthalten.
   ausgeliefert.
 - **HTML-Escape** in allen serverseitig gerenderten Antworten.
 
-Unit-Tests zum Path- und Filename-Sanitizer laufen in CI (`npm test`).
+- **View-Bindung** (ab 0.6.0) — Zugriff nur über signierte View-Tokens,
+  gebunden an Verbindung, Startordner, Benutzer und View-Rechte (siehe
+  unten). Zugangsdaten verlassen den Server nie.
+- **Zeilenrechte** — Datensätze für *Pfad aus Feld* werden mit Saltcorns
+  Tabellenrechten geladen; ohne Datensatz keine Ansicht (fail closed).
+- **Sichere Auslieferung** — aktive Inhalte (HTML, SVG, XML …) nur in einer
+  CSP-Sandbox, `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: no-referrer`, `Cross-Origin-Resource-Policy: same-origin`,
+  RFC-5987-Dateinamen.
+- **Pro Verbindung** zusätzlich *Mindestrolle Lesen/Schreiben*, *Nur lesen*
+  und – am wichtigsten – ein eigener SMB-Service-Account mit minimalen
+  Rechten.
+- **Verbindungstest** `/sambatest` nur für Admins, mit CSRF-Schutz.
+
+### View-Bindung
+
+Beim Anzeigen einer `SambaFileManager`- oder `SambaTree`-View stellt der
+Server ein Token aus (HMAC-SHA256, siehe `view-token.js`). Es enthält:
+
+| Claim | Bedeutung |
+|---|---|
+| Verbindung | Kennung, die die View verwendet – `conn` im Request kann sie nicht ändern |
+| Startordner | `view_base_path` + Ordner aus dem Datensatz + Unterpfad; alle Pfade müssen darin liegen (Segmentgrenzen: `kunden/42` erlaubt nicht `kunden/420`) |
+| Schreiben | File-Manager: ja, außer *Nur lesen (diese View)*; Tree: nie |
+| Versteckte Dateien / smb://-Links | gemäß View-Konfiguration |
+| Benutzer | Saltcorn-User-ID; ein Token eines anderen Nutzers wird abgelehnt |
+| Ablauf | Standard 12 h; bei Nutzung gleitend verlängert |
+
+Zusätzlich gilt: Der Startordner selbst kann nicht gelöscht oder umbenannt
+werden, Umbenennen/Verschieben nach außerhalb ist gesperrt, und die
+Rollen-/Verbindungsrechte werden weiterhin bei jedem Request geprüft – die
+View kann Rechte nur **einschränken**, nie erweitern.
+
+**Schlüssel:** abgeleitet aus Saltcorns `session_secret` (pro Mandant
+getrennt). Alternativ ein eigenes *Geheimnis für View-Tokens* in Schritt 2 –
+nötig nur bei mehreren Saltcorn-Knoten mit unterschiedlichen Secrets.
+
+**Modus** *Zugriff nur über Views*:
+
+- `required` (Standard) — Requests ohne gültiges Token → `401`.
+- `optional` — Übergangsmodus für eigene Skripte: Requests **ohne** Token
+  verhalten sich wie in 0.5 (nur Rollenprüfung); Requests **mit** Token
+  bleiben gebunden.
+
+Das Token steht in Links (`vt=…`), weil Browser bei `<a>`, `<iframe>` und
+`<img>` keine Header senden. Deshalb liefern die Datei-Routen
+`Referrer-Policy: no-referrer`; die Gültigkeit ist begrenzt und das Token
+nützt nur dem angemeldeten Benutzer, für den es ausgestellt wurde.
+
+Unit-Tests (Sanitizer, Verbindungen, Rechte) laufen in CI (`npm test`).
 
 ### Client-/Server-Trennung
 
@@ -355,6 +509,11 @@ Ab v0.4.16 sind alle sichtbaren Texte übersetzbar. Ausgeliefert werden **de**
 und **en**.
 
 - Kataloge liegen als JSON unter `i18n/<locale>.json`.
+- Die eigentliche Lookup- und Placeholder-Interpolation lebt in **einer**
+  gemeinsamen Datei `public/samba-i18n-runtime.js` (UMD-Wrapper), die sowohl
+  von `i18n.js` (via `require`) als auch vom Browser (via `<script>` →
+  `window.SambaI18nRuntime`) geladen wird. So gibt es keine doppelte
+  `interpolate/translate`-Implementierung mehr.
 - Serverseitige Nutzung: `const { t, tFor } = require("./i18n");`
   → `t("fm.upload.button", { locale: "de" })` bzw.
   `const _t = tFor("de"); _t("fm.upload.button")`.
@@ -492,10 +651,15 @@ Typische Fehlermeldungen und was zu tun ist:
 - Dateien werden komplett gepuffert (`readFile` / `writeFile`). Für
   Dateien > 100 MB besser einen CIFS-Mount + Saltcorn-`File`-Typ nutzen.
 - **Nur SMB2/3** — SMBv1 wird nicht unterstützt.
-- **Ein SMB-User** entscheidet über Sichtbarkeit und Schreibrechte auf
-  dem Share — für rollen­spezifische Sichtbarkeit auf Share-Ebene
-  arbeiten oder mehrere Plugin-Instanzen verwenden.
+- **Ein SMB-User pro Verbindung** entscheidet über Sichtbarkeit und
+  Schreibrechte auf dem Share — für rollen­spezifische Sichtbarkeit mehrere
+  Verbindungen mit unterschiedlichen Service-Accounts und Mindestrollen
+  anlegen.
+- Uploads werden über Saltcorns Standard-Upload angenommen; ist in Saltcorn
+  **S3-Storage** aktiv, lehnt das Plugin Uploads mit einer Meldung ab.
 - **Keine DB-Verknüpfung** von SMB-Dateien (geplant für spätere Version).
+- Der (deaktivierte) Fieldview `samba_pdf` stellt kein View-Token aus und
+  funktioniert nur im Modus *Zugriff nur über Views* = `optional`.
 
 ---
 

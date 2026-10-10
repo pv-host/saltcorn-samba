@@ -26,7 +26,17 @@
 const Workflow = require("@saltcorn/data/models/workflow");
 const Form = require("@saltcorn/data/models/form");
 const Field = require("@saltcorn/data/models/field");
-const { getState } = require("@saltcorn/data/db/state");
+// FieldRepeat (wiederholbare Feldgruppen) für die Liste zusätzlicher
+// Verbindungen. Lazy + tolerant geladen, damit sehr alte Saltcorn-Builds
+// ohne FieldRepeat das Plugin trotzdem laden können.
+function getFieldRepeat() {
+  try {
+    const mod = require("@saltcorn/data/models/fieldrepeat");
+    return (mod && mod.default) || mod;
+  } catch (_) {
+    return null;
+  }
+}
 
 // User-Modell nur beim Bedarf laden (lazy) — vermeidet Zirkulär-Import-
 // Probleme beim Plugin-Load. Manche Saltcorn-Builds liefern die Klasse als
@@ -48,6 +58,23 @@ const {
   sanitizeRelativePath,
   sanitizeFilename,
 } = require("./smb-client");
+const fs = require("fs");
+const {
+  DEFAULT_CONNECTION,
+  buildConnections,
+  resolveConnection,
+  permissionsFor,
+} = require("./connections");
+const { getPluginConfig, registerManifest, rememberConfig } = require("./plugin-config");
+const { explainSmbError } = require("./smb-errors");
+const { verifyViewToken, issueViewToken, isWithinRoot, needsRenewal } = require("./view-token");
+const {
+  bindingMode,
+  tokenTtlSec,
+  signingKey,
+  tokenFromRequest,
+  restrictPermissions,
+} = require("./view-binding");
 const treeView = require("./tree-view");
 const fileManagerView = require("./filemanager-view");
 const {
@@ -84,19 +111,26 @@ const CONNECTION_TEST_HTML = `
       Benutzer an und listet das Wurzel-Verzeichnis des Shares (bzw. den
       Basispfad, falls angegeben) auf. Es werden keine Daten geschrieben.
     </p>
-    <button type="button" class="btn btn-primary" onclick="sambaTestConn(this)">
+    <button type="button" class="btn btn-primary" onclick="sambaTestConn(this, '', 'default', 'sambaTestOut')">
       → Verbindung jetzt testen
     </button>
     <div id="sambaTestOut" style="margin-top:.8rem"></div>
   </div>
 </div>
 <script>
-window.sambaTestConn = async function(btn) {
-  var out = document.getElementById('sambaTestOut');
+// suffix: "" für die Standardverbindung, "_0", "_1", … für Zusatzverbindungen
+// (Saltcorn benennt Felder in wiederholbaren Gruppen <feld>_<index>).
+window.sambaTestConn = async function(btn, suffix, connName, outId) {
+  var out = document.getElementById(outId || 'sambaTestOut');
   var form = btn.closest('form');
   if (!form) { out.innerHTML = '<div class="alert alert-danger">Formular nicht gefunden.</div>'; return; }
-  function v(n){ var el = form.querySelector('[name="'+n+'"]'); return el ? el.value : ''; }
+  suffix = suffix || '';
+  function v(n){ var el = form.querySelector('[name="'+n+suffix+'"]'); return el ? el.value : ''; }
+  // HTML-Escape für alle Werte, die in innerHTML landen.
+  function h(x){ return String(x==null?'':x).replace(/[<>&"]/g,function(c){return {'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c];}); }
+  if (suffix) { connName = v('name') || connName; }
   var payload = {
+    conn:            connName || 'default',
     server:          v('server'),
     share:           v('share'),
     domain:          v('domain'),
@@ -171,9 +205,9 @@ window.sambaTestConn = async function(btn) {
       out.innerHTML =
         '<div class="alert alert-success">' +
           '<b>✓ Verbindung erfolgreich</b> (' + data.duration_ms + ' ms)<br>' +
-          'Server: <code>' + data.server + ':' + data.port + '</code>, Share: <code>' + data.share + '</code>, ' +
-          'Basispfad: <code>' + data.base_path + '</code>, Benutzer: <code>' + data.username + '</code><br>' +
-          'Einträge gefunden: <b>' + data.entry_count + '</b>' + (data.truncated ? ' (erste 20 unten)' : '') +
+          'Server: <code>' + h(data.server) + ':' + h(data.port) + '</code>, Share: <code>' + h(data.share) + '</code>, ' +
+          'Basispfad: <code>' + h(data.base_path) + '</code>, Benutzer: <code>' + h(data.username) + '</code><br>' +
+          'Einträge gefunden: <b>' + h(data.entry_count) + '</b>' + (data.truncated ? ' (erste 20 unten)' : '') +
           (rows ? '<ul style="margin:.5rem 0 0 1rem">' + rows + '</ul>' : '') +
           noteHtml +
         '</div>';
@@ -187,7 +221,7 @@ window.sambaTestConn = async function(btn) {
         '<div class="alert alert-danger">' +
           '<b>' + titleForCode + '</b><br>' +
           'Fehler: <code>' + String(data && data.error || 'Unbekannt').replace(/[<>&]/g,'?') + '</code>' +
-          (data && data.code ? ' <span class="text-muted">(' + data.code + ')</span>' : '') + '<br>' +
+          (data && data.code ? ' <span class="text-muted">(' + h(data.code) + ')</span>' : '') + '<br>' +
           (data && data.hint ? '<div style="margin-top:.4rem"><b>Hinweis:</b> ' + String(data.hint).replace(/[<>&]/g,'?') + '</div>' : '') +
           ((function(){
             var d = data && data.diagnostics;
@@ -274,11 +308,183 @@ window.sambaTestConn = async function(btn) {
 </script>
 `;
 
+// Testblock für die Zusatzverbindungen (Schritt 3). Saltcorn rendert die
+// wiederholbare Feldgruppe mit Feldnamen <feld>_<index>; das Skript sucht
+// alle vorhandenen Indizes und erzeugt je Verbindung einen Test-Button.
+// Nutzt sambaTestConn() aus CONNECTION_TEST_HTML – wird hier bei Bedarf
+// erneut definiert, weil Schritt 1 auf einer anderen Seite liegt.
+const EXTRA_CONNECTIONS_TEST_HTML =
+  CONNECTION_TEST_HTML
+    .replace(/<div class="card mb-3"[\s\S]*?<\/div>\n<\/div>\n/, "")
+    .replace("<script>", `<div class="card mb-3" style="border-left:4px solid #0d6efd">
+  <div class="card-body">
+    <h5 class="card-title" style="margin-top:0">Zusatzverbindungen testen</h5>
+    <p class="card-text" style="margin-bottom:.6rem">
+      Prüft die oben eingegebenen Verbindungen einzeln (vor dem Speichern möglich).
+      Es werden keine Daten geschrieben.
+    </p>
+    <button type="button" class="btn btn-outline-primary" onclick="sambaScanConns(this)">
+      → Test-Buttons für alle Verbindungen anzeigen
+    </button>
+    <div id="sambaConnTests" style="margin-top:.8rem"></div>
+  </div>
+</div>
+<script>
+window.sambaScanConns = function(btn) {
+  var form = btn.closest('form');
+  var box = document.getElementById('sambaConnTests');
+  if (!form || !box) return;
+  var idx = [];
+  form.querySelectorAll('[name^="server_"]').forEach(function(el){
+    var m = /^server_(\\d+)$/.exec(el.name); if (m && idx.indexOf(m[1]) < 0) idx.push(m[1]);
+  });
+  if (!idx.length) { box.innerHTML = '<div class="alert alert-info">Noch keine Zusatzverbindung angelegt.</div>'; return; }
+  box.innerHTML = '';
+  idx.forEach(function(i){
+    var nameEl = form.querySelector('[name="name_' + i + '"]');
+    var label = (nameEl && nameEl.value) || ('#' + (Number(i) + 1));
+    var wrap = document.createElement('div'); wrap.style.marginBottom = '.6rem';
+    var b = document.createElement('button'); b.type = 'button'; b.className = 'btn btn-sm btn-primary';
+    b.textContent = 'Verbindung „' + label + '“ testen';
+    var out = document.createElement('div'); out.id = 'sambaTestOut_' + i; out.style.marginTop = '.4rem';
+    b.onclick = function(){ window.sambaTestConn(b, '_' + i, label, out.id); };
+    wrap.appendChild(b); wrap.appendChild(out); box.appendChild(wrap);
+  });
+};`);
+
+/** Felder einer Zusatzverbindung (Inhalt der wiederholbaren Gruppe). */
+function extraConnectionFields() {
+  const modeOptions = ["if-offered", "required", "disabled"];
+  return [
+    new Field({
+      name: "name",
+      label: "Kennung",
+      sublabel:
+        "Eindeutiger technischer Name, über den Views die Verbindung auswählen, z. B. <code>archiv</code> oder " +
+        "<code>nas-standort2</code>. Erlaubt: Buchstaben, Ziffern, <code>_ - .</code>; <code>default</code> ist reserviert.",
+      type: "String",
+    }),
+    new Field({
+      name: "label",
+      label: "Anzeigename (optional)",
+      sublabel: "Wird als Badge im Kopf der View angezeigt. Leer = Kennung.",
+      type: "String",
+    }),
+    new Field({ name: "server", label: "Server (Hostname oder IP)", type: "String" }),
+    new Field({ name: "share", label: "Freigabe / Share-Name", type: "String" }),
+    new Field({ name: "domain", label: "Domäne / Arbeitsgruppe", type: "String", default: "WORKGROUP" }),
+    new Field({ name: "username", label: "Benutzername", type: "String" }),
+    new Field({ name: "password", label: "Passwort", type: "String", input_type: "password" }),
+    new Field({
+      name: "base_path",
+      label: "Basispfad (optional)",
+      sublabel: "Beschränkt den Zugriff dieser Verbindung auf ein Unterverzeichnis der Freigabe.",
+      type: "String",
+    }),
+    new Field({ name: "port", label: "TCP-Port", type: "Integer", default: 445 }),
+    new Field({
+      name: "signing_mode",
+      label: "SMB-Signing",
+      type: "String",
+      attributes: { options: modeOptions },
+      default: "if-offered",
+    }),
+    new Field({
+      name: "encryption_mode",
+      label: "SMB-Verschlüsselung",
+      type: "String",
+      attributes: { options: modeOptions },
+      default: "if-offered",
+    }),
+    new Field({
+      name: "public_smb_host",
+      label: "Für Clients sichtbarer SMB-Hostname (optional)",
+      sublabel: "Für <code>smb://</code>-Links. Leer = Server.",
+      type: "String",
+    }),
+    new Field({
+      name: "read_only",
+      label: "Nur lesen",
+      sublabel: "Sperrt Upload, Löschen, Umbenennen und Ordner anlegen für diese Verbindung – unabhängig von Rollen.",
+      type: "Bool",
+    }),
+    new Field({
+      name: "min_role_read",
+      label: "Mindestrolle Lesen (optional)",
+      sublabel: "Leer = globaler Wert aus „Zugriff & Berechtigungen“. 1=Admin, 40=Staff, 80=User, 100=Public.",
+      type: "Integer",
+    }),
+    new Field({
+      name: "min_role_write",
+      label: "Mindestrolle Schreiben (optional)",
+      sublabel: "Leer = globaler Wert. 100 = Schreiben für diese Verbindung komplett aus.",
+      type: "Integer",
+    }),
+  ];
+}
+
+/** Schritt 3 der Plugin-Konfiguration: weitere Verbindungen. */
+function extraConnectionsStep() {
+  const FieldRepeat = getFieldRepeat();
+  return {
+    name: "Weitere Verbindungen",
+    form: (context) => {
+      const { problems } = buildConnections(context || {});
+      const problemHtml = problems.length
+        ? '<div class="alert alert-warning"><b>Folgende Einträge werden ignoriert:</b><ul style="margin:.3rem 0 0 1rem">' +
+          problems.map((p) => "<li>" + String(p).replace(/[<>&]/g, "?") + "</li>").join("") +
+          "</ul></div>"
+        : "";
+      const intro =
+        '<p class="text-muted">Optional. Hier legen Sie zusätzliche Samba-Server bzw. Freigaben an. ' +
+        "Jede View wählt in ihrer Konfiguration, welche Verbindung sie nutzt (<code>default</code> = Schritt 1). " +
+        "Upload-/Lösch-Schalter, Größenlimit und Endungs-Sperrliste aus „Zugriff &amp; Berechtigungen“ gelten für alle Verbindungen.</p>";
+      if (!FieldRepeat) {
+        return new Form({
+          fields: [
+            new Field({
+              name: "_no_repeat",
+              label: " ",
+              input_type: "custom_html",
+              attributes: {
+                html:
+                  '<div class="alert alert-warning">Diese Saltcorn-Version unterstützt keine wiederholbaren ' +
+                  "Feldgruppen. Bitte Saltcorn aktualisieren, um mehrere Verbindungen zu nutzen.</div>",
+              },
+            }),
+          ],
+        });
+      }
+      return new Form({
+        fields: [
+          new Field({
+            name: "_conn_intro",
+            label: " ",
+            input_type: "custom_html",
+            attributes: { html: intro + problemHtml },
+          }),
+          new FieldRepeat({
+            name: "connections",
+            label: "Zusatzverbindungen",
+            fields: extraConnectionFields(),
+          }),
+          new Field({
+            name: "_conn_test_html",
+            label: " ",
+            input_type: "custom_html",
+            attributes: { html: EXTRA_CONNECTIONS_TEST_HTML },
+          }),
+        ],
+      });
+    },
+  };
+}
+
 const configuration_workflow = () =>
   new Workflow({
     steps: [
       {
-        name: "Samba-Server",
+        name: "Samba-Server (Standardverbindung „default“)",
         form: () =>
           new Form({
             fields: [
@@ -472,9 +678,51 @@ const configuration_workflow = () =>
                   "(z. B. <code>fileserver.local</code>).",
                 type: "String",
               }),
+              new Field({
+                name: "_view_binding_head",
+                label: " ",
+                input_type: "custom_html",
+                attributes: {
+                  html:
+                    '<h5 style="margin-top:1rem">View-Bindung (Sicherheit)</h5>' +
+                    '<p class="text-muted small">Jede Samba-View erhält beim Anzeigen ein signiertes Token. ' +
+                    "Damit sind Verbindung, Startordner und erlaubte Aktionen an genau diese View gebunden – " +
+                    "manipulierte Requests auf andere Verbindungen oder Ordner werden abgelehnt.</p>",
+                },
+              }),
+              new Field({
+                name: "view_binding",
+                label: "Zugriff nur über Views",
+                sublabel:
+                  "<b>required</b> (empfohlen): Datei-Routen nur mit gültigem View-Token. " +
+                  "<b>optional</b>: Übergangsmodus für eigene Skripte – Requests ohne Token verhalten sich wie in v0.5 " +
+                  "(Verbindung frei wählbar, nur Rollenprüfung).",
+                type: "String",
+                attributes: { options: ["required", "optional"] },
+                default: "required",
+              }),
+              new Field({
+                name: "view_token_ttl_hours",
+                label: "Gültigkeit eines View-Tokens (Stunden)",
+                sublabel:
+                  "Standard 12, erlaubt 1–168. Bei aktiver Nutzung verlängert sich das Token automatisch; " +
+                  "danach muss die Seite neu geladen werden.",
+                type: "Integer",
+                default: 12,
+              }),
+              new Field({
+                name: "view_token_secret",
+                label: "Geheimnis für View-Tokens (optional)",
+                sublabel:
+                  "Leer = Saltcorns <code>session_secret</code> (empfohlen). Nur setzen, wenn mehrere Saltcorn-Knoten " +
+                  "unterschiedliche session_secrets haben. Mind. 16 Zeichen. Ändern macht alle offenen Ansichten ungültig.",
+                type: "String",
+                input_type: "password",
+              }),
             ],
           }),
       },
+      extraConnectionsStep(),
     ],
   });
 
@@ -482,37 +730,210 @@ const configuration_workflow = () =>
 // Route helpers
 // ---------------------------------------------------------------------------
 
-function getConfig() {
-  const state = getState();
-  const cfgs = (state && state.plugin_cfgs) || {};
-  return (
-    cfgs[PLUGIN_NAME] ||
-    cfgs["saltcorn-samba"] ||
-    cfgs["@saltcorn/saltcorn-samba"] ||
-    {}
+/**
+ * Zentrale Zugriffsprüfung für ALLE Datei-Routen.
+ *
+ * Ab v0.6.0 mit View-Bindung: Jede View erhält beim Rendern ein signiertes
+ * Token (view-token.js). Ist es vorhanden, bestimmt AUSSCHLIESSLICH das
+ * Token Verbindung, Wurzelpfad und View-Rechte – `conn` aus dem Request
+ * dient nur noch als Plausibilitätsprüfung. Im Modus „required“
+ * (Standard) werden Requests ohne gültiges Token abgelehnt.
+ *
+ * Ablauf:
+ *   1. Token lesen und prüfen (Signatur, Ablauf, Benutzer).
+ *   2. Verbindung serverseitig auflösen (unbekannt → 404).
+ *   3. Rechte = Verbindung (Rolle, read_only, allow_*) UND View (Token).
+ *   4. Leserecht; bei `permission` zusätzlich das Aktionsrecht.
+ *
+ * Ergebnis: aufgelöste Verbindung; zusätzlich `req.sambaView` (Claims oder
+ * null) und `req.sambaPerms`. Bei Fehlern wird direkt geantwortet und
+ * `null` zurückgegeben. Der Pfad wird anschließend mit inScope() geprüft.
+ *
+ * @param {object} opts
+ * @param {string} [opts.permission]  z. B. "allowUpload" (Schlüssel aus permissionsFor)
+ * @param {string} [opts.disabledMsg] Meldung, wenn die Aktion deaktiviert ist
+ * @param {boolean} [opts.text]       Fehler als text/plain statt JSON senden
+ */
+function connectionForRequest(req, res, opts) {
+  const o = opts || {};
+  const fail = (status, msg, code) => {
+    if (o.text) res.status(status).type("text/plain").send(msg);
+    else res.status(status).json(code ? { error: msg, code } : { error: msg });
+  };
+  const pluginCfg = getPluginConfig();
+  const requested =
+    (req.body && typeof req.body === "object" && req.body.conn) ||
+    (req.query && req.query.conn) ||
+    "";
+
+  // 1. View-Token
+  let claims = null;
+  const token = tokenFromRequest(req);
+  if (token) {
+    try {
+      claims = verifyViewToken(token, signingKey(pluginCfg), req);
+    } catch (e) {
+      if (e.code === "VIEW_TOKEN_INVALID") {
+        console.warn("[saltcorn-samba] Abgelehntes View-Token (" + e.message + ") von " + (req.ip || "?"));
+      }
+      fail(e.status || 401, e.message, e.code);
+      return null;
+    }
+    if (requested && String(requested) !== claims.c) {
+      fail(400, "Verbindung im Request passt nicht zur View.", "VIEW_CONN_MISMATCH");
+      return null;
+    }
+  } else if (bindingMode(pluginCfg) === "required") {
+    fail(
+      401,
+      "Zugriff nur über eine Samba-View möglich (View-Token fehlt). Bitte die Seite neu laden.",
+      "VIEW_TOKEN_MISSING"
+    );
+    return null;
+  }
+
+  // 2. Verbindung
+  let conn;
+  try {
+    conn = resolveConnection(pluginCfg, claims ? claims.c : requested || DEFAULT_CONNECTION);
+  } catch (e) {
+    fail(e.status || 400, e.message);
+    return null;
+  }
+
+  // 3. Rechte
+  const perms = restrictPermissions(permissionsFor(req, conn), claims);
+  if (!perms.canRead) {
+    fail(403, "Keine Leseberechtigung für die Verbindung „" + conn.label + "“.");
+    return null;
+  }
+  if (o.permission && !perms[o.permission]) {
+    if (claims && !claims.w) {
+      fail(403, "Diese Ansicht erlaubt keine Änderungen.", "VIEW_READ_ONLY");
+    } else if (!perms.canWrite) {
+      fail(
+        403,
+        conn.read_only
+          ? "Die Verbindung „" + conn.label + "“ ist schreibgeschützt."
+          : "Keine Schreibberechtigung (Rolle reicht nicht – siehe „Mindestrolle für Upload / Löschen / Umbenennen“)."
+      );
+    } else {
+      fail(403, o.disabledMsg || "Aktion in der Plugin-Konfiguration deaktiviert.");
+    }
+    return null;
+  }
+  req.sambaView = claims;
+  req.sambaPerms = perms;
+  return conn;
+}
+
+/**
+ * Liegt `rel` (bereits durch sanitizeRelativePath normalisiert) innerhalb
+ * der Wurzel der aufrufenden View? Ohne Bindung (Modus „optional“ ohne
+ * Token) ist die ganze Verbindung erlaubt.
+ *
+ * @param {object} [o]
+ * @param {boolean} [o.notRoot] Wurzel selbst ist verboten (Löschen/Umbenennen)
+ * @param {boolean} [o.text]    Fehler als text/plain
+ * @returns {boolean} false → Antwort wurde bereits gesendet
+ */
+function inScope(req, res, rel, o) {
+  const opt = o || {};
+  const claims = req.sambaView;
+  if (!claims) return true;
+  const root = claims.r || "";
+  let msg = null;
+  if (!isWithinRoot(rel, root)) msg = "Pfad liegt außerhalb des Bereichs dieser Ansicht.";
+  else if (opt.notRoot && rel === root) msg = "Der Startordner dieser Ansicht kann nicht verändert werden.";
+  if (!msg) return true;
+  if (opt.text) res.status(403).type("text/plain").send(msg);
+  else res.status(403).json({ error: msg, code: "VIEW_SCOPE" });
+  return false;
+}
+
+/**
+ * Verlängert das Token gleitend (Header `X-Samba-View-Token` in der
+ * Antwort), wenn weniger als die halbe Laufzeit übrig ist. Der Browser
+ * übernimmt das neue Token automatisch (samba-common.js).
+ */
+function maybeRenewToken(req, res) {
+  const claims = req.sambaView;
+  if (!claims) return;
+  const pluginCfg = getPluginConfig();
+  const ttl = tokenTtlSec(pluginCfg);
+  if (!needsRenewal(claims, ttl)) return;
+  const fresh = issueViewToken(
+    { c: claims.c, r: claims.r, w: claims.w, h: claims.h, l: claims.l, u: claims.u, vn: claims.vn },
+    signingKey(pluginCfg),
+    ttl
   );
+  res.setHeader("X-Samba-View-Token", fresh);
 }
 
-function roleOf(req) {
-  const u =
-    (req && req.user) ||
-    (req && req.session && req.session.passport && req.session.passport.user) ||
-    null;
-  if (!u) return 100;
-  const rid = u.role_id !== undefined ? u.role_id : u.roleId;
-  const n = Number(rid);
-  return Number.isFinite(n) && n > 0 ? n : 100;
+// ---------------------------------------------------------------------------
+// Sichere Auslieferung von Dateien (ab v0.6.0)
+// ---------------------------------------------------------------------------
+//
+// Dateien vom Share stammen von beliebigen Nutzern (auch direkt per SMB
+// abgelegt). Eine HTML- oder SVG-Datei, die inline auf der Saltcorn-Domain
+// geöffnet wird, könnte sonst JavaScript mit der Sitzung des Betrachters
+// ausführen (gespeichertes XSS). Deshalb:
+//   - inline nur für PDF, Rasterbilder und Text; Text immer als text/plain,
+//   - alles andere (HTML, SVG, XML, Office, …) inline nur in einer
+//     CSP-Sandbox (kein Skript, eigener Ursprung),
+//   - nosniff, kein Referrer (Token in der URL!), same-origin-Ressource.
+
+const INLINE_SAFE = {
+  pdf: "application/pdf",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  bmp: "image/bmp",
+};
+const INLINE_AS_TEXT = new Set(["txt", "log", "csv", "md", "json", "ini", "conf", "yml", "yaml"]);
+
+/**
+ * Bestimmt Content-Type, Disposition und ob eine Sandbox nötig ist.
+ * @param {string} name       Dateiname
+ * @param {string} requested  "inline" | "attachment" aus der URL
+ */
+function deliveryFor(name, requested) {
+  const ext = String(name).split(".").pop().toLowerCase();
+  if (requested === "attachment") {
+    return { disposition: "attachment", contentType: mimeFromName(name), sandbox: true };
+  }
+  if (INLINE_SAFE[ext]) {
+    return { disposition: "inline", contentType: INLINE_SAFE[ext], sandbox: ext !== "pdf" };
+  }
+  if (INLINE_AS_TEXT.has(ext)) {
+    return { disposition: "inline", contentType: "text/plain; charset=utf-8", sandbox: true };
+  }
+  // HTML, SVG, XML, unbekannt: anzeigen ja, aber nur in der Sandbox.
+  return { disposition: "inline", contentType: mimeFromName(name), sandbox: true };
 }
 
-function canRead(req, cfg) {
-  return roleOf(req) <= Number(cfg.min_role_read || 80);
+/** RFC 6266 / 5987: ASCII-Fallback + UTF-8-Name, keine Header-Injection. */
+function contentDisposition(disposition, name) {
+  const ascii = String(name).replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  return `${disposition}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name).replace(/['()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase())}`;
 }
 
-function canWrite(req, cfg) {
-  const min = Number(cfg.min_role_write || 40);
-  // 100 explicitly disables all writes
-  if (min >= 100) return false;
-  return roleOf(req) <= min;
+function setFileSecurityHeaders(res, delivery) {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+  // PDF bekommt keine Sandbox – Chromes PDF-Viewer verweigert sonst die
+  // Anzeige. Browser-PDF-Viewer führen kein Seiten-JavaScript aus.
+  if (delivery.sandbox) {
+    res.setHeader(
+      "Content-Security-Policy",
+      "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; frame-ancestors 'self'"
+    );
+  } else {
+    res.setHeader("Content-Security-Policy", "frame-ancestors 'self'");
+  }
 }
 
 function jsonError(res, status, msg) {
@@ -523,20 +944,41 @@ function jsonOk(res, extra) {
   res.json({ ok: true, ...(extra || {}) });
 }
 
+// CSRF: Saltcorns globale csurf-Middleware prüft jeden POST (Header
+// X-CSRF-Token bzw. Feld _csrf), BEVOR eine Plugin-Route läuft. Ein eigener
+// Vergleich hier wäre falsch (csurf erzeugt pro Aufruf neue Salt-Tokens).
+
 /**
- * CSRF verification is handled by Saltcorn's global csurf middleware
- * (packages/server/app.js). By the time our route handler runs, csurf
- * has already validated req.body._csrf / X-CSRF-Token / csrf-token /
- * xsrf-token headers against the session secret. A manual re-check
- * here would be wrong: csrf-tokens returns a NEW salted token on
- * every call to req.csrfToken(), so `provided !== req.csrfToken()`
- * would fail even for perfectly valid requests.
- *
- * We keep this stub as the single documented spot to attach future
- * pre-flight authorisation checks if ever needed.
+ * Inhalt einer hochgeladenen Datei als Buffer. Saltcorn konfiguriert
+ * express-fileupload mit `useTempFiles: true` → Inhalt in `tempFilePath`.
+ * Ohne Temp-Files (andere Hosts/Tests) liegt er in `data`.
  */
-function checkCsrf(_req, _res) {
-  return true;
+async function uploadedContent(file) {
+  if (file.tempFilePath) {
+    return await fs.promises.readFile(file.tempFilePath);
+  }
+  return Buffer.isBuffer(file.data) ? file.data : Buffer.from(file.data || "");
+}
+
+/** Alle hochgeladenen Dateien des Requests (Feld „file“ bzw. „files“) als Array. */
+function uploadedFileList(req) {
+  if (!req.files || Array.isArray(req.files)) return [];
+  const raw = req.files.file || req.files.files;
+  if (!raw) return [];
+  return Array.isArray(raw) ? raw : [raw];
+}
+
+/** Temp-Dateien von express-fileupload entfernen (best effort). */
+async function cleanupTempFiles(files) {
+  for (const f of files || []) {
+    if (f && f.tempFilePath) {
+      try {
+        await fs.promises.unlink(f.tempFilePath);
+      } catch (_) {
+        // bereits entfernt oder kein Zugriff – ignorieren
+      }
+    }
+  }
 }
 
 function deniedExtensionsFor(cfg) {
@@ -577,16 +1019,20 @@ const routes = [
     url: "/sambadir",
     method: "get",
     callback: async (req, res) => {
-      const cfg = getConfig();
-      if (!cfg.server) return jsonError(res, 500, "Samba plugin not configured");
-      if (!canRead(req, cfg)) return jsonError(res, 403, "Forbidden");
+      const cfg = connectionForRequest(req, res);
+      if (!cfg) return;
       let rel = "";
       try {
         rel = sanitizeRelativePath(req.query.path || "");
       } catch (e) {
         return jsonError(res, 400, e.message);
       }
-      const showHidden = req.query.show_hidden === "1";
+      // Ohne Pfadangabe startet eine gebundene View in ihrer Wurzel.
+      if (!rel && req.sambaView) rel = req.sambaView.r || "";
+      if (!inScope(req, res, rel)) return;
+      // Versteckte Dateien nur, wenn die View sie erlaubt (Token `h`).
+      const showHidden =
+        req.query.show_hidden === "1" && (!req.sambaView || req.sambaView.h);
       try {
         const entries = await withClient(cfg, (c) => c.readdir(rel));
         const items = entries
@@ -601,22 +1047,17 @@ const routes = [
             mtime: e.mtime,
             birthtime: e.birthtime,
           }));
-        // Advertise write permission to the client so it can hide buttons
-        // for users that lack the role.
+        // Rechte an den Browser melden, damit er nur erlaubte Buttons zeigt.
+        // Dieselbe Funktion prüft auch die Schreibrouten (connectionForRequest).
+        maybeRenewToken(req, res);
         res.json({
           path: rel,
+          connection: cfg.name,
           items,
-          perms: {
-            canWrite: canWrite(req, cfg),
-            allowUpload: cfg.allow_upload !== false && canWrite(req, cfg),
-            allowDelete: cfg.allow_delete !== false && canWrite(req, cfg),
-            allowRename: cfg.allow_rename !== false && canWrite(req, cfg),
-            allowMkdir: cfg.allow_mkdir !== false && canWrite(req, cfg),
-            maxUploadMb: Number(cfg.max_upload_mb || 50),
-          },
+          perms: req.sambaPerms,
         });
       } catch (e) {
-        jsonError(res, 500, "Samba: " + (e.message || String(e)));
+        jsonError(res, 500, "Samba: " + explainSmbError(e, cfg));
       }
     },
   },
@@ -625,31 +1066,28 @@ const routes = [
     url: "/sambafile",
     method: "get",
     callback: async (req, res) => {
-      const cfg = getConfig();
-      if (!cfg.server) return res.status(500).send("Samba plugin not configured");
-      if (!canRead(req, cfg)) return res.status(403).send("Forbidden");
+      const cfg = connectionForRequest(req, res, { text: true });
+      if (!cfg) return;
       let rel = "";
       try {
         rel = sanitizeRelativePath(req.query.path || "");
       } catch (e) {
         return res.status(400).send(e.message);
       }
+      if (!inScope(req, res, rel, { text: true })) return;
       if (!rel) return res.status(400).send("path required");
-      const disposition =
-        req.query.disposition === "attachment" ? "attachment" : "inline";
       const base = rel.split("/").pop();
+      const delivery = deliveryFor(base, req.query.disposition);
       try {
         const data = await withClient(cfg, (c) => c.readFile(rel));
-        res.setHeader("Content-Type", mimeFromName(base));
+        res.setHeader("Content-Type", delivery.contentType);
         res.setHeader("Content-Length", data.length);
-        res.setHeader(
-          "Content-Disposition",
-          `${disposition}; filename="${encodeURIComponent(base)}"`
-        );
+        res.setHeader("Content-Disposition", contentDisposition(delivery.disposition, base));
         res.setHeader("Cache-Control", "private, max-age=0, no-store");
+        setFileSecurityHeaders(res, delivery);
         res.end(data);
       } catch (e) {
-        res.status(500).send("Samba: " + (e.message || String(e)));
+        res.status(500).send("Samba: " + explainSmbError(e, cfg));
       }
     },
   },
@@ -658,14 +1096,17 @@ const routes = [
     url: "/sambalink",
     method: "get",
     callback: async (req, res) => {
-      const cfg = getConfig();
-      if (!cfg.server) return res.status(500).send("Samba plugin not configured");
-      if (!canRead(req, cfg)) return res.status(403).send("Forbidden");
+      const cfg = connectionForRequest(req, res, { text: true });
+      if (!cfg) return;
       let rel = "";
       try {
         rel = sanitizeRelativePath(req.query.path || "");
       } catch (e) {
         return res.status(400).send(e.message);
+      }
+      if (!inScope(req, res, rel, { text: true })) return;
+      if (req.sambaView && !req.sambaView.l) {
+        return res.status(403).type("text/plain").send("smb://-Links sind in dieser Ansicht deaktiviert.");
       }
       const effectiveCfg = { ...cfg, server: cfg.public_smb_host || cfg.server };
       const url = toSmbUrl(effectiveCfg, rel);
@@ -704,15 +1145,10 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
   {
     url: "/sambatest",
     method: "post",
-    // The route is protected by an explicit admin check in the handler
-    // (roleOf(req) !== 1 returns 403), so the standard CSRF middleware
-    // would only add friction without adding security here — the token
-    // hidden field is not in scope of an arbitrary attacker who cannot
-    // already run scripts inside an admin's browser (which would defeat
-    // any web-app anyway). Setting noCsrf keeps the button working even
-    // when the config-page CSRF token has already been consumed by the
-    // save-workflow or when a stricter CSRF policy is applied.
-    noCsrf: true,
+    // Ab v0.6.0 KEIN noCsrf mehr: Die Route baut Verbindungen zu
+    // beliebigen Hosts auf (SSRF-Potenzial) und darf daher nicht per
+    // Cross-Site-Request auslösbar sein. Das Testskript sendet
+    // `_sc_globalCsrf` bzw. das `_csrf`-Feld des Formulars als Header.
     callback: async (req, res) => {
       // -----------------------------------------------------------------
       // Admin gate — komplett neu in 0.3.8:
@@ -726,16 +1162,11 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
       //      zu einer Number (siehe saltcorn user.ts Zeile 120).
       //   3. Vergleich strikt gegen Number 1.
       //
-      // Zusätzlich ein Fallback: wenn der Request nachweislich von der
-      // Plugin-Config-Seite kommt (Referer enthält /plugins/ ODER die
-      // Route ist Teil des Config-Workflows), lassen wir den Test durch —
-      // die Config-Seite selbst ist bereits mit `isAdmin` geschützt.
       // -----------------------------------------------------------------
       const debug = {
         has_req_user: !!(req && req.user),
         has_session: !!(req && req.session),
         has_passport: !!(req && req.session && req.session.passport),
-        session_id: (req && req.sessionID) || null,
         req_user_keys: (req && req.user) ? Object.keys(req.user).slice(0, 15) : [],
         req_user_role_id: (req && req.user) ? req.user.role_id : undefined,
         req_user_role_id_type: (req && req.user && req.user.role_id !== undefined)
@@ -743,7 +1174,6 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
         session_passport_user: (req && req.session && req.session.passport)
           ? req.session.passport.user : undefined,
         req_user_id: (req && req.user) ? (req.user.id || req.user.user_id) : null,
-        req_user_email: (req && req.user) ? req.user.email : null,
         referer: (req && req.headers) ? (req.headers.referer || req.headers.referrer || null) : null,
       };
 
@@ -772,7 +1202,6 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
               debug.db_lookup = lookup;
               debug.db_role_id = dbRoleId;
               debug.db_role_id_type = typeof dbRoleId;
-              debug.db_email = dbUser.email;
               if (Number(dbRoleId) === 1) { adminByDb = true; break; }
             } else {
               debug.db_lookup_failed = lookup;
@@ -798,18 +1227,11 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
         }
       }
 
-      // (C) Referer-Fallback: die Plugin-Config-Seite ist mit Saltcorns
-      //     isAdmin-Middleware geschützt (packages/server/routes/plugins.ts).
-      //     Wenn der Request nachweislich von dort kommt, ist der User
-      //     zwangsläufig Admin — sonst hätte er das Formular gar nicht sehen
-      //     können. Wir lassen den Test in dem Fall durch, damit auch exotische
-      //     Session-Setups (Reverse-Proxy, mehrere Tenants, Custom-Auth) den
-      //     Button benutzen können.
-      const referer = String((req && req.headers && (req.headers.referer || req.headers.referrer)) || "");
-      const adminByReferer = /\/plugins?\/(configure|saltcorn-samba)/i.test(referer);
-      debug.admin_by_referer = adminByReferer;
-
-      const isAdmin = adminByDb || adminBySession || adminByReferer;
+      // (C) Den früheren Referer-Fallback gibt es ab v0.6.0 nicht mehr:
+      //     Der Referer-Header ist vom Client frei setzbar
+      //     (curl -H "Referer: …/plugins/configure"), damit war die Route
+      //     ohne Anmeldung nutzbar.
+      const isAdmin = adminByDb || adminBySession;
       debug.admin_by_db = adminByDb;
       debug.admin_by_session = adminBySession;
 
@@ -821,9 +1243,7 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
           hint:
             "Der Server hat Sie für diese Anfrage nicht als Administrator erkannt. " +
             "Sehen Sie im Panel „Session-Diagnose“ unten, welche Werte Saltcorn dem " +
-            "Plugin übergibt — und melden Sie sich ggf. neu an. Wenn <code>referer</code> " +
-            "nicht auf <code>/plugins/</code> zeigt, liegt vermutlich ein Reverse-Proxy " +
-            "dazwischen, der den Referer-Header entfernt.",
+            "Plugin übergibt — und melden Sie sich ggf. neu an.",
           debug,
         });
       }
@@ -841,6 +1261,20 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
         signing_mode: String(body.signing_mode || "").trim() || undefined,
         encryption_mode: String(body.encryption_mode || "").trim() || undefined,
       };
+
+      // Passwortfelder werden beim erneuten Öffnen der Konfiguration ggf. leer
+      // angezeigt. Ist das Feld leer und passen Server + Freigabe zur bereits
+      // gespeicherten Verbindung gleicher Kennung, nehmen wir deren Passwort.
+      if (!testCfg.password && body.conn) {
+        try {
+          const saved = resolveConnection(getPluginConfig(), body.conn);
+          if (saved.server === testCfg.server && saved.share === testCfg.share) {
+            testCfg.password = String(saved.password || "");
+          }
+        } catch (_) {
+          // noch nicht gespeichert – dann eben ohne Passwort testen
+        }
+      }
 
       if (!testCfg.server) return jsonError(res, 400, "Please enter a Server (hostname or IP).");
       if (!testCfg.share) return jsonError(res, 400, "Please enter a Share name.");
@@ -1107,28 +1541,47 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
     url: "/sambaupload",
     method: "post",
     callback: async (req, res) => {
-      const cfg = getConfig();
-      if (!cfg.server) return jsonError(res, 500, "Samba plugin not configured");
-      if (!canWrite(req, cfg)) return jsonError(res, 403, "Forbidden");
-      if (!cfg.allow_upload) return jsonError(res, 403, "Uploads disabled");
-      if (!checkCsrf(req, res)) return;
+      const cfg = connectionForRequest(req, res, {
+        permission: "allowUpload",
+        disabledMsg: "Datei-Upload ist in der Plugin-Konfiguration deaktiviert (Schritt „Zugriff & Berechtigungen“).",
+      });
+      if (!cfg) {
+        // Abgelehnt – die bereits von express-fileupload angelegten
+        // Temp-Dateien trotzdem entfernen.
+        await cleanupTempFiles(uploadedFileList(req));
+        return;
+      }
 
-      // Saltcorn uses express-fileupload — files land on req.files.
-      const raw = req.files && (req.files.file || req.files.files);
-      if (!raw) return jsonError(res, 400, "No files uploaded (field 'file')");
-      const files = Array.isArray(raw) ? raw : [raw];
-      if (!files.length) return jsonError(res, 400, "No files uploaded");
+      // Saltcorn verwendet express-fileupload mit `useTempFiles: true`:
+      // Der Inhalt liegt dann in `tempFilePath`, `data` ist ein LEERER
+      // Buffer. Bis v0.4.16 wurde `data` geschrieben → 0-Byte-Dateien auf
+      // dem Share bei gleichzeitiger Erfolgsmeldung. (Bei aktiviertem
+      // S3-Storage nutzt Saltcorn multer – req.files ist dann ein Array.)
+      if (Array.isArray(req.files)) {
+        return jsonError(
+          res,
+          501,
+          "Upload nicht möglich: In Saltcorn ist S3-Storage aktiv. Das Samba-Plugin unterstützt nur den Standard-Upload."
+        );
+      }
+      const files = uploadedFileList(req);
+      if (!files.length) return jsonError(res, 400, "Keine Datei empfangen (Formularfeld „file“ fehlt).");
 
       let dir = "";
       try {
         dir = sanitizeRelativePath(req.body && req.body.path);
       } catch (e) {
+        await cleanupTempFiles(files);
         return jsonError(res, 400, e.message);
+      }
+      if (!inScope(req, res, dir)) {
+        await cleanupTempFiles(files);
+        return;
       }
 
       const maxBytes = Number(cfg.max_upload_mb || 50) * 1024 * 1024;
-      const results = [];
       const overwrite = String(req.body && req.body.overwrite) === "1";
+      const results = [];
 
       try {
         await withClient(cfg, async (c) => {
@@ -1141,32 +1594,40 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
               results.push({ name: f.name, ok: false, error: e.message });
               continue;
             }
-            if (f.size > maxBytes) {
-              results.push({
-                name,
-                ok: false,
-                error: `File exceeds max size of ${cfg.max_upload_mb} MiB`,
-              });
+            if (f.truncated) {
+              results.push({ name, ok: false, error: "Upload abgebrochen – Saltcorn-Upload-Limit („file_upload_limit“) überschritten." });
+              continue;
+            }
+            if (Number(f.size) > maxBytes) {
+              results.push({ name, ok: false, error: `Datei größer als ${cfg.max_upload_mb || 50} MiB` });
               continue;
             }
             const rel = joinRel(dir, name);
-            if (!overwrite) {
-              const exists = await c.exists(rel);
-              if (exists) {
-                results.push({ name, ok: false, error: "File already exists" });
+            try {
+              if (!overwrite && (await c.exists(rel))) {
+                results.push({ name, ok: false, error: "Datei existiert bereits (\u201eÜberschreiben\u201c aktivieren)" });
                 continue;
               }
-            }
-            try {
-              await c.writeFile(rel, f.data);
-              results.push({ name, ok: true, size: f.size });
+              const content = await uploadedContent(f);
+              await c.writeFile(rel, content);
+              // Gegenprobe: Stimmt die Größe auf dem Share? Fängt stille
+              // Teil-Schreibvorgänge ab, statt „OK“ zu melden.
+              const st = await c.stat(rel);
+              if (Number(st.size) !== content.length) {
+                throw new Error(
+                  `Größe auf dem Share (${st.size} Bytes) weicht vom Upload (${content.length} Bytes) ab`
+                );
+              }
+              results.push({ name, ok: true, size: content.length });
             } catch (e) {
-              results.push({ name, ok: false, error: e.message || String(e) });
+              results.push({ name, ok: false, error: explainSmbError(e, cfg) });
             }
           }
         });
       } catch (e) {
-        return jsonError(res, 500, "Samba: " + (e.message || String(e)));
+        return jsonError(res, 500, "Samba: " + explainSmbError(e, cfg));
+      } finally {
+        await cleanupTempFiles(files);
       }
 
       const anyFailed = results.some((r) => !r.ok);
@@ -1178,11 +1639,11 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
     url: "/sambadelete",
     method: "post",
     callback: async (req, res) => {
-      const cfg = getConfig();
-      if (!cfg.server) return jsonError(res, 500, "Samba plugin not configured");
-      if (!canWrite(req, cfg)) return jsonError(res, 403, "Forbidden");
-      if (!cfg.allow_delete) return jsonError(res, 403, "Delete disabled");
-      if (!checkCsrf(req, res)) return;
+      const cfg = connectionForRequest(req, res, {
+        permission: "allowDelete",
+        disabledMsg: "Löschen ist in der Plugin-Konfiguration deaktiviert.",
+      });
+      if (!cfg) return;
 
       let rel = "";
       try {
@@ -1191,6 +1652,7 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
         return jsonError(res, 400, e.message);
       }
       if (!rel) return jsonError(res, 400, "path required");
+      if (!inScope(req, res, rel, { notRoot: true })) return;
 
       const isDir = String(req.body && req.body.isDir) === "1";
       try {
@@ -1200,7 +1662,7 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
         });
         jsonOk(res, { deleted: rel });
       } catch (e) {
-        jsonError(res, 500, "Samba: " + (e.message || String(e)));
+        jsonError(res, 500, "Samba: " + explainSmbError(e, cfg));
       }
     },
   },
@@ -1209,11 +1671,11 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
     url: "/sambarename",
     method: "post",
     callback: async (req, res) => {
-      const cfg = getConfig();
-      if (!cfg.server) return jsonError(res, 500, "Samba plugin not configured");
-      if (!canWrite(req, cfg)) return jsonError(res, 403, "Forbidden");
-      if (!cfg.allow_rename) return jsonError(res, 403, "Rename disabled");
-      if (!checkCsrf(req, res)) return;
+      const cfg = connectionForRequest(req, res, {
+        permission: "allowRename",
+        disabledMsg: "Umbenennen ist in der Plugin-Konfiguration deaktiviert.",
+      });
+      if (!cfg) return;
 
       let fromRel, toRel;
       try {
@@ -1222,6 +1684,7 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
         return jsonError(res, 400, "from: " + e.message);
       }
       if (!fromRel) return jsonError(res, 400, "from required");
+      if (!inScope(req, res, fromRel, { notRoot: true })) return;
 
       // Rename accepts either a new full path OR a new bare filename in the
       // same directory as `from`.
@@ -1247,6 +1710,8 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
         return jsonError(res, 400, e.message);
       }
       if (fromRel === toRel) return jsonOk(res, { renamed: toRel });
+      // Auch das Ziel muss im Bereich der View liegen (kein Verschieben nach außen).
+      if (!inScope(req, res, toRel, { notRoot: true })) return;
 
       // Enforce extension policy also on rename target.
       try {
@@ -1258,12 +1723,12 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
       try {
         await withClient(cfg, async (c) => {
           const exists = await c.exists(toRel);
-          if (exists) throw new Error("Target already exists");
+          if (exists) throw new Error("Ziel existiert bereits (STATUS_OBJECT_NAME_COLLISION)");
           await c.rename(fromRel, toRel);
         });
         jsonOk(res, { from: fromRel, to: toRel });
       } catch (e) {
-        jsonError(res, 500, "Samba: " + (e.message || String(e)));
+        jsonError(res, 500, "Samba: " + explainSmbError(e, cfg));
       }
     },
   },
@@ -1301,11 +1766,11 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
     url: "/sambamkdir",
     method: "post",
     callback: async (req, res) => {
-      const cfg = getConfig();
-      if (!cfg.server) return jsonError(res, 500, "Samba plugin not configured");
-      if (!canWrite(req, cfg)) return jsonError(res, 403, "Forbidden");
-      if (!cfg.allow_mkdir) return jsonError(res, 403, "Mkdir disabled");
-      if (!checkCsrf(req, res)) return;
+      const cfg = connectionForRequest(req, res, {
+        permission: "allowMkdir",
+        disabledMsg: "Ordner anlegen ist in der Plugin-Konfiguration deaktiviert (Schritt „Zugriff & Berechtigungen“).",
+      });
+      if (!cfg) return;
 
       let parent = "";
       try {
@@ -1313,6 +1778,7 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
       } catch (e) {
         return jsonError(res, 400, "path: " + e.message);
       }
+      if (!inScope(req, res, parent)) return;
       let name;
       try {
         name = sanitizeFilename(req.body && req.body.name);
@@ -1321,14 +1787,15 @@ code{background:#f4f4f4;padding:2px 6px;border-radius:3px;word-break:break-all}<
       }
       const rel = joinRel(parent, name);
       try {
-        await withClient(cfg, async (c) => {
-          const exists = await c.exists(rel);
-          if (exists) throw new Error("Directory already exists");
+        const outcome = await withClient(cfg, async (c) => {
+          if (await c.exists(rel)) return { status: 409, error: "Ein Ordner oder eine Datei „" + name + "“ existiert bereits." };
           await c.mkdir(rel);
+          return null;
         });
+        if (outcome) return jsonError(res, outcome.status, outcome.error);
         jsonOk(res, { created: rel });
       } catch (e) {
-        jsonError(res, 500, "Samba: " + (e.message || String(e)));
+        jsonError(res, 500, "Samba: " + explainSmbError(e, cfg));
       }
     },
   },
@@ -1400,18 +1867,31 @@ function wrapView(v) {
 //   https://github.com/saltcorn/saltcorn/blob/master/packages/saltcorn-data/models/plugin.ts
 // ---------------------------------------------------------------------------
 
-module.exports = {
+const manifest = {
   sc_plugin_api_version: 1,
   configuration_workflow,
-  // The four keys below are consumed via `withCfg` → must be factory fns.
-  viewtemplates: () => [wrapView(fileManagerView), wrapView(treeView)],
-  routes: () => routes,
+  // The keys below are consumed via `withCfg` → must be factory fns.
+  // Saltcorn übergibt dabei die aktuelle Konfiguration; wir merken sie uns
+  // als letzten Fallback für getPluginConfig().
+  viewtemplates: (cfg) => {
+    rememberConfig(cfg);
+    return [wrapView(fileManagerView), wrapView(treeView)];
+  },
+  routes: (cfg) => {
+    rememberConfig(cfg);
+    return routes;
+  },
   headers: () => [
     { css: `/plugins/public/${PLUGIN_NAME}/samba.css` },
   ],
   // `dependencies` is iterated directly (for..of) → must be a raw array.
   dependencies: [],
 };
+
+// getPluginConfig() erkennt die eigene Konfiguration über dieses Objekt
+// in getState().plugins – unabhängig vom Installationsnamen.
+registerManifest(manifest);
+module.exports = manifest;
 
 // Note: the `samba_pdf` fieldview shipped in v0.1–0.3.1 has been removed from
 // the top-level manifest because Saltcorn's plugin loader requires field

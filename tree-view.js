@@ -1,5 +1,5 @@
 /**
- * View template: `samba_tree`
+ * View template: `SambaTree`
  *
  * Renders a lazy-loading directory tree of a Samba share. Each directory can
  * be expanded via AJAX; clicking a file opens the PDF viewer route (for PDFs
@@ -10,16 +10,32 @@
  *   - "static"          – always show the same base_path from the config
  *   - "from_field"      – append the value of a row field to base_path
  *                         (only meaningful when embedded in a Show view)
+ *
+ * Ab v0.5.0 wählt jede View eine Samba-Verbindung aus der Plugin-
+ * Konfiguration – statisch oder pro Zeile aus einem Tabellenfeld.
  */
 
-const { div, a, i, span, script, button } = require("@saltcorn/markup/tags");
+"use strict";
+
+const { div, span, script } = require("@saltcorn/markup/tags");
 const Workflow = require("@saltcorn/data/models/workflow");
 const Form = require("@saltcorn/data/models/form");
 const Field = require("@saltcorn/data/models/field");
 const Table = require("@saltcorn/data/models/table");
 
-const { withClient, toSmbUrl, sanitizeRelativePath } = require("./smb-client");
-const { catalogFor, resolveLocaleFromReq, tFor } = require("./i18n");
+const { tFor, resolveLocaleFromReq } = require("./i18n");
+const { getPluginConfig } = require("./plugin-config");
+const { resolveConnection } = require("./connections");
+const {
+  computeStartPath,
+  resolveViewConnection,
+  connectionConfigFields,
+  resolveLocaleAndCatalog,
+  bootstrapScript,
+  loadRowForView,
+  assertRowPath,
+  viewTokenFor,
+} = require("./view-common");
 
 // ---------------------------------------------------------------------------
 // Configuration workflow
@@ -31,7 +47,7 @@ const configuration_workflow = () =>
       {
         name: "Tree options",
         form: async (context) => {
-          const table = await Table.findOne({ id: context.table_id });
+          const table = context.table_id ? await Table.findOne({ id: context.table_id }) : null;
           const fields = table ? await table.getFields() : [];
           const stringFieldOptions = fields
             .filter(
@@ -42,13 +58,14 @@ const configuration_workflow = () =>
             .map((f) => f.name);
           return new Form({
             fields: [
+              ...connectionConfigFields(Field, getPluginConfig(), stringFieldOptions),
               new Field({
                 name: "view_base_path",
-                label: "View-Basispfad (relativ zum Plugin-Basispfad)",
+                label: "View-Basispfad (relativ zum Basispfad der Verbindung)",
                 type: "String",
                 sublabel:
-                  "Optional. Statischer Pfad relativ zum Plugin-Basispfad, der f\u00fcr diese View gilt. " +
-                  "Beispiel: Plugin-Basispfad = 'static', View-Basispfad = 'projekte/2026' \u2192 View listet 'static/projekte/2026'. " +
+                  "Optional. Statischer Pfad relativ zum Basispfad der gew\u00e4hlten Verbindung. " +
+                  "Beispiel: Basispfad = 'static', View-Basispfad = 'projekte/2026' \u2192 View listet 'static/projekte/2026'. " +
                   "Keine f\u00fchrenden/abschlie\u00dfenden Slashes n\u00f6tig. Traversal (\u201e..\u201c) wird abgelehnt.",
               }),
               new Field({
@@ -56,9 +73,7 @@ const configuration_workflow = () =>
                 label: "Row-Modus",
                 type: "String",
                 required: true,
-                attributes: {
-                  options: ["static", "from_field"],
-                },
+                attributes: { options: ["static", "from_field"] },
                 sublabel:
                   "static = immer nur der View-Basispfad. from_field = h\u00e4nge einen Feldwert der aktuellen Zeile an " +
                   "(nur sinnvoll, wenn die View in einer Show-View eingebettet ist).",
@@ -79,11 +94,7 @@ const configuration_workflow = () =>
                   "Optional. Statischer Suffix, der nach dem Feldwert angeh\u00e4ngt wird. Beispiel: 'invoices'.",
                 showIf: { mode: "from_field" },
               }),
-              new Field({
-                name: "show_hidden",
-                label: "Show hidden files",
-                type: "Bool",
-              }),
+              new Field({ name: "show_hidden", label: "Show hidden files", type: "Bool" }),
               new Field({
                 name: "pdf_inline",
                 label: "Open PDFs inline",
@@ -105,167 +116,101 @@ const configuration_workflow = () =>
     ],
   });
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-async function get_state_fields(table_id, viewname, { mode, path_field }) {
-  if (mode === "from_field" && !path_field) return [];
-  // The tree view can be embedded in a Show view and does not require any
-  // state fields on its own – we always operate on the current row.
+async function get_state_fields() {
+  // Die Tree-View braucht keine eigenen State-Felder – sie arbeitet immer
+  // auf der aktuellen Zeile (eingebettet) bzw. dem statischen Pfad.
   return [];
-}
-
-/**
- * Compose the start path (relative to the plugin base_path) from three
- * optional parts:
- *   1. `view_base_path`  — static, per-view prefix
- *   2. row field value    — only in "from_field" mode
- *   3. `extra_subpath`   — static suffix, only in "from_field" mode
- *
- * Empty parts are dropped and slash-trimmed. The final joined path is
- * passed through sanitizeRelativePath so traversal / absolute paths /
- * backslashes are rejected consistently.
- */
-function computeStartPath(configuration, row) {
-  const parts = [];
-  if (configuration.view_base_path) {
-    parts.push(String(configuration.view_base_path));
-  }
-  if (configuration.mode === "from_field" && configuration.path_field && row) {
-    const v = row[configuration.path_field];
-    if (v) parts.push(String(v));
-  }
-  if (
-    configuration.mode === "from_field" &&
-    configuration.extra_subpath
-  ) {
-    parts.push(String(configuration.extra_subpath));
-  }
-  const joined = parts
-    .map((p) => p.replace(/^\/+|\/+$/g, ""))
-    .filter(Boolean)
-    .join("/");
-  // sanitizeRelativePath throws on traversal – we let the caller handle it.
-  return sanitizeRelativePath(joined);
 }
 
 // ---------------------------------------------------------------------------
 // Render – client-side JS is served from /public/samba-tree.js
 // ---------------------------------------------------------------------------
 
-/**
- * Escaped-Serialisierung des i18n-Katalogs, damit ein enthaltenes `</script>`
- * im \u00dcbersetzungstext den HTML-Parser nicht vorzeitig beendet.
- */
-function serialiseCatalog(catalog) {
-  return JSON.stringify(catalog || {}).replace(/</g, "\\u003c");
-}
-
-function renderShell(viewname, startPath, configuration, locale, catalog) {
+function renderShell(p) {
+  const { viewname, startPath, connection, configuration, locale, catalog, viewToken } = p;
   const treeId = `samba-tree-${Math.random().toString(36).slice(2, 10)}`;
-  const pluginVersion = configuration.__pluginVersion || "0.2.0";
+  const pluginVersion = configuration.__pluginVersion || "0.6.0";
   const pathLabel = (catalog && catalog["ui.path"]) || "Path:";
+  // Nur Kennung + Anzeigename der Verbindung gehen an den Browser.
   const opts = {
     viewname,
     startPath,
+    connection: connection.name,
     pdfInline: !!configuration.pdf_inline,
     exposeSmbLink: configuration.expose_smb_link !== false,
     showHidden: !!configuration.show_hidden,
+    viewToken, // bindet Requests an diese View (Tree = immer nur lesen)
     locale: locale || "en",
   };
-  const catalogJson = serialiseCatalog(catalog);
   return (
     div(
-      { class: "samba-tree-container card p-2" },
+      { class: "samba-tree-container card p-2", "data-samba-connection": connection.name },
       div(
         { class: "samba-tree-toolbar d-flex align-items-center mb-2" },
         span({ class: "text-muted small me-2" }, pathLabel),
-        span({ class: "samba-tree-breadcrumb small fw-bold" }, startPath || "/")
+        span({ class: "samba-tree-breadcrumb small fw-bold" }, startPath || "/"),
+        connection.name !== "default"
+          ? span({ class: "badge bg-secondary ms-2 samba-tree-conn" }, connection.label)
+          : ""
       ),
       div({ id: treeId, class: "samba-tree", "data-opts": JSON.stringify(opts) }),
       div({ id: treeId + "-viewer", class: "samba-viewer mt-3" })
     ) +
     script(
-      // Erst samba-common.js (i18n + Utilities) nachladen, Katalog setzen,
-      // danach die eigentliche samba-tree.js booten.
-      `(function(){
-         var CATALOG=${catalogJson};
-         function applyCatalog(){ if(window.SambaCommon && window.SambaCommon.setCatalog) window.SambaCommon.setCatalog(CATALOG); }
-         function mount(){window.saltcornSambaMount && window.saltcornSambaMount(${JSON.stringify(
-           treeId
-         )});}
-         function loadTree(){
-           if(window.saltcornSambaMount){ mount(); return; }
-           var s=document.createElement('script');
-           s.src='/plugins/public/saltcorn-samba@${pluginVersion}/samba-tree.js';
-           s.onload=mount;
-           document.head.appendChild(s);
-         }
-         if(window.SambaCommon){ applyCatalog(); loadTree(); return; }
-         var c=document.createElement('script');
-         c.src='/plugins/public/saltcorn-samba@${pluginVersion}/samba-common.js';
-         c.onload=function(){ applyCatalog(); loadTree(); };
-         document.head.appendChild(c);
-       })();`
+      bootstrapScript({
+        pluginVersion,
+        catalog,
+        viewScript: "samba-tree.js",
+        readyGlobal: "saltcornSambaMount",
+        mountExpression: `window.saltcornSambaMount(${JSON.stringify(treeId)})`,
+      })
     )
   );
+}
+
+function renderFor(viewname, configuration, row, extra) {
+  let connection;
+  let startPath;
+  let viewToken;
+  try {
+    assertRowPath(configuration, row);
+    connection = resolveConnection(getPluginConfig(), resolveViewConnection(configuration, row));
+    startPath = computeStartPath(configuration, row || {});
+    viewToken = viewTokenFor({
+      req: extra && extra.req,
+      viewname,
+      connection: connection.name,
+      startPath,
+      write: false,
+      hidden: !!configuration.show_hidden,
+      smbLink: configuration.expose_smb_link !== false,
+    });
+  } catch (e) {
+    const _t = tFor(resolveLocaleFromReq(extra && extra.req));
+    return div({ class: "alert alert-danger" }, _t("tree.samba_prefix") + e.message);
+  }
+  const { locale, catalog } = resolveLocaleAndCatalog(extra);
+  return renderShell({ viewname, startPath, connection, configuration, locale, catalog, viewToken });
 }
 
 // ---------------------------------------------------------------------------
 // View: run (single row) and runMany
 // ---------------------------------------------------------------------------
 
-/**
- * Bestimmt Locale und Katalog aus dem Saltcorn-Request. `resolveLocaleFromReq`
- * f\u00e4llt bei fehlendem `req` auf "en" zur\u00fcck – kein Crash, kein leeres UI.
- */
-function resolveLocaleAndCatalog(extra) {
-  const req = extra && extra.req;
-  const locale = resolveLocaleFromReq(req);
-  return { locale, catalog: catalogFor(locale) };
-}
-
 async function run(table_id, viewname, configuration, state, extra) {
-  // "state" typically contains the primary key of the row when the view is
-  // opened directly. If we are embedded in a Show view, `extra.row` is set.
+  // "state" enthält beim direkten Aufruf meist den Primärschlüssel der Zeile;
+  // eingebettet in eine Show-View ist `extra.row` gesetzt.
   let row = extra && extra.row;
-  if (!row && configuration.mode === "from_field") {
+  if (!row && (configuration.mode === "from_field" || configuration.connection_field) && table_id) {
     const table = await Table.findOne({ id: table_id });
-    if (table && state && Object.keys(state).length) {
-      row = await table.getRow(state);
-    }
+    row = await loadRowForView(table, state, extra && extra.req);
   }
-  let startPath = "";
-  try {
-    startPath = computeStartPath(configuration, row || {});
-  } catch (e) {
-    const _t = tFor(resolveLocaleFromReq(extra && extra.req));
-    return div({ class: "alert alert-danger" }, _t("tree.samba_prefix") + e.message);
-  }
-  const { locale, catalog } = resolveLocaleAndCatalog(extra);
-  return renderShell(viewname, startPath, configuration, locale, catalog);
+  return renderFor(viewname, configuration, row, extra);
 }
 
 async function runMany(table_id, viewname, configuration, state, extra) {
-  const rows = extra && extra.rows ? extra.rows : [];
-  const { locale, catalog } = resolveLocaleAndCatalog(extra);
-  return rows.map((row) => ({
-    html: renderShell(
-      viewname,
-      (() => {
-        try {
-          return computeStartPath(configuration, row);
-        } catch {
-          return "";
-        }
-      })(),
-      configuration,
-      locale,
-      catalog
-    ),
-    row,
-  }));
+  const rows = (extra && extra.rows) || [];
+  return rows.map((row) => ({ html: renderFor(viewname, configuration, row, extra), row }));
 }
 
 module.exports = {

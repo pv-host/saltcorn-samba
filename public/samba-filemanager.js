@@ -42,47 +42,24 @@
   }
 
   // ---- HTTP-Helper -------------------------------------------------------
-  /**
-   * GET /sambadir mit definierten Fehlermeldungen: JSON-`error`-Feld
-   * schlägt HTTP-Status als Meldung.
-   */
-  async function fetchDirectory(path, showHidden) {
-    var url =
-      "/sambadir?path=" + encodeURIComponent(path || "") +
-      (showHidden ? "&show_hidden=1" : "");
-    var response = await fetch(url, { credentials: "same-origin" });
-    if (!response.ok) {
-      var msg;
-      try { msg = (await response.json()).error; } catch (_) { msg = "HTTP " + response.status; }
-      throw new Error(msg || "HTTP " + response.status);
-    }
-    return response.json();
+  // Beide Helfer laufen über SambaCommon.viewFetch: View-Token, CSRF-Header,
+  // Token-Verlängerung und Fehlermeldungen sind dort zentral gelöst.
+
+  /** GET /sambadir für `path` auf der Verbindung der View `view`. */
+  function fetchDirectory(path, showHidden, view) {
+    return C.viewFetch(view, C.apiUrl("/sambadir", {
+      path: path || "",
+      show_hidden: showHidden ? "1" : undefined,
+    }, view));
   }
 
-  /**
-   * POST als JSON mit CSRF-Token-Header. Erwartet JSON-Antwort mit optionalem
-   * `error`-Feld; Status-Code wird bei Fehlern als `.status` durchgereicht.
-   */
-  async function postJson(url, body, csrfToken) {
-    var response = await fetch(url, {
+  /** POST als JSON an eine Schreibroute der View `view`. */
+  function postJson(url, body, view) {
+    return C.viewFetch(view, url, {
       method: "POST",
-      credentials: "same-origin",
-      headers: {
-        "Content-Type": "application/json",
-        "X-CSRF-Token": csrfToken || "",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body || {}),
     });
-    var data = null;
-    try { data = await response.json(); } catch (_) { data = null; }
-    if (!response.ok) {
-      var msg = (data && data.error) || ("HTTP " + response.status);
-      var err = new Error(msg);
-      err.status = response.status;
-      err.body = data;
-      throw err;
-    }
-    return data || { ok: true };
   }
 
   // ---- Toast + Modal -----------------------------------------------------
@@ -158,6 +135,17 @@
       lastItems: [],
       perms: {},
     };
+
+    /** URL zum Datei-Inhalt auf der Verbindung dieser View. */
+    function fileUrl(fullPath, disposition) {
+      return C.apiUrl("/sambafile", { path: fullPath, disposition: disposition }, opts);
+    }
+
+    /** POST an eine Schreibroute – hängt immer die Verbindung dieser View an. */
+    function postAction(route, body) {
+      var payload = Object.assign({}, body || {}, { conn: opts.connection || "default" });
+      return postJson(route, payload, opts);
+    }
 
     function canGoUp() {
       if (!opts.allowNavigateUp) return false;
@@ -343,19 +331,19 @@
         } else {
           actions.push(element("a", {
             class: "btn btn-sm btn-outline-secondary me-1",
-            href: "/sambafile?path=" + encodeURIComponent(fullPath) + "&disposition=inline",
+            href: fileUrl(fullPath, "inline"),
             target: "_blank", title: C.t("fm.open_new_tab"),
           }, [C.t("fm.view")]));
           actions.push(element("a", {
             class: "btn btn-sm btn-outline-secondary me-1",
-            href: "/sambafile?path=" + encodeURIComponent(fullPath) + "&disposition=attachment",
+            href: fileUrl(fullPath, "attachment"),
             title: C.t("fm.download"),
           }, ["⬇"]));
         }
         if (opts.exposeSmbLink) {
           actions.push(element("a", {
             class: "btn btn-sm btn-outline-primary me-1",
-            href: "/sambalink?path=" + encodeURIComponent(fullPath),
+            href: C.apiUrl("/sambalink", { path: fullPath }, opts),
             target: "_blank",
             title: C.t("fm.smb_link_title"),
           }, ["↗"]));
@@ -436,13 +424,13 @@
     /** Öffnet eine Datei entweder inline im Viewer oder in einem neuen Tab. */
     function openFile(item, fullPath) {
       if (!viewerRoot) {
-        window.open("/sambafile?path=" + encodeURIComponent(fullPath) + "&disposition=inline", "_blank");
+        window.open(fileUrl(fullPath, "inline"), "_blank");
         return;
       }
       if (opts.pdfInline && C.isViewable(item.name)) {
         viewerRoot.innerHTML = "";
         var isImage = /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(item.name);
-        var streamUrl = "/sambafile?path=" + encodeURIComponent(fullPath) + "&disposition=inline";
+        var streamUrl = fileUrl(fullPath, "inline");
         var header = element("div", {
           class: "samba-fm-viewer-header d-flex align-items-center p-2 border-top",
         }, [
@@ -465,7 +453,7 @@
           }, []));
         }
       } else {
-        window.open("/sambafile?path=" + encodeURIComponent(fullPath) + "&disposition=inline", "_blank");
+        window.open(fileUrl(fullPath, "inline"), "_blank");
       }
     }
 
@@ -491,9 +479,9 @@
           type: "button", class: "btn btn-danger",
           onclick: async function () {
             try {
-              await postJson("/sambadelete", {
+              await postAction("/sambadelete", {
                 path: fullPath, isDir: item.isDir ? "1" : "0",
-              }, opts.csrfToken);
+              });
               dialog.close();
               toast(C.t("fm.deleted_ok", { name: item.name }), "success");
               load(state.path);
@@ -526,9 +514,9 @@
             var newName = input.value.trim();
             if (!newName || newName === item.name) { dialog.close(); return; }
             try {
-              await postJson("/sambarename", {
+              await postAction("/sambarename", {
                 from: fullPath, newName: newName,
-              }, opts.csrfToken);
+              });
               dialog.close();
               toast(C.t("fm.renamed_ok", { name: newName }), "success");
               load(state.path);
@@ -561,9 +549,9 @@
             var name = input.value.trim();
             if (!name) return;
             try {
-              await postJson("/sambamkdir", {
+              await postAction("/sambamkdir", {
                 path: state.path, name: name,
-              }, opts.csrfToken);
+              });
               dialog.close();
               toast(C.t("fm.mkdir_ok", { name: name }), "success");
               load(state.path);
@@ -655,21 +643,17 @@
             uploadButton.setAttribute("disabled", "disabled");
             try {
               var formData = new FormData();
+              formData.append("conn", opts.connection || "default");
               formData.append("path", state.path);
               formData.append("overwrite", overwriteCheckbox.checked ? "1" : "0");
               files.forEach(function (file) { formData.append("file", file); });
               progress.innerHTML = C.t("fm.upload.uploading");
-              var response = await fetch("/sambaupload", {
+              // 207 = einzelne Dateien fehlgeschlagen (Details in results[]).
+              var data = await C.viewFetch(opts, "/sambaupload", {
                 method: "POST",
-                credentials: "same-origin",
-                headers: { "X-CSRF-Token": opts.csrfToken || "" },
                 body: formData,
+                allowStatus: [207],
               });
-              var data = null;
-              try { data = await response.json(); } catch (_) { data = null; }
-              if (!response.ok && response.status !== 207) {
-                throw new Error((data && data.error) || ("HTTP " + response.status));
-              }
               var results = (data && data.results) || [];
               var okCount = results.filter(function (item) { return item.ok; }).length;
               var failed = results.filter(function (item) { return !item.ok; });
@@ -710,14 +694,18 @@
       state.path = path;
       listRoot.innerHTML = '<div class="text-muted p-3">' + C.t("ui.loading") + "</div>";
       try {
-        var data = await fetchDirectory(path, state.showHidden);
+        var data = await fetchDirectory(path, state.showHidden, opts);
         state.lastItems = data.items || [];
         state.perms = data.perms || {};
         render();
       } catch (err) {
-        listRoot.innerHTML =
-          '<div class="alert alert-danger m-2">' +
-          C.t("tree.samba_prefix") + (err.message || String(err)) + "</div>";
+        // textContent statt innerHTML: Fehlermeldungen können Datei- oder
+        // Ordnernamen vom Server enthalten.
+        listRoot.innerHTML = "";
+        listRoot.appendChild(element("div", {
+          class: "alert alert-danger m-2",
+          text: C.t("tree.samba_prefix") + (err.message || String(err)),
+        }, []));
         renderToolbar();
       }
     }

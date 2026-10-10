@@ -1,11 +1,11 @@
 {
   "name": "saltcorn-samba",
-  "version": "0.4.16",
-  "description": "Saltcorn plugin: browse, upload, rename and delete files on a Samba/CIFS share via SMB 3.1.1 (AES-CMAC signing, optional encryption). File-manager view, directory tree, inline PDF viewer, external-app open (smb://).",
+  "version": "0.6.0",
+  "description": "Saltcorn plugin: browse, upload, rename and delete files on one or more Samba/CIFS shares via SMB 3.1.1 (AES-CMAC signing, optional encryption). File-manager view, directory tree, inline PDF viewer, external-app open (smb://).",
   "main": "index.js",
   "scripts": {
-    "test": "node test/sanitize.test.js",
-    "lint": "node --check index.js && node --check smb-client.js && node --check readdir-compat.js && node --check tree-view.js && node --check filemanager-view.js && node --check pdf-view.js && node --check i18n.js && node --check public/samba-tree.js && node --check public/samba-filemanager.js && node --check public/samba-common.js",
+    "test": "node test/sanitize.test.js && node test/connections.test.js && node test/view-token.test.js",
+    "lint": "node --check index.js && node --check smb-client.js && node --check readdir-compat.js && node --check tree-view.js && node --check filemanager-view.js && node --check pdf-view.js && node --check i18n.js && node --check connections.js && node --check smb-errors.js && node --check plugin-config.js && node --check view-common.js && node --check view-token.js && node --check view-binding.js && node --check public/samba-i18n-runtime.js && node --check public/samba-tree.js && node --check public/samba-filemanager.js && node --check public/samba-common.js",
     "prepublishOnly": "npm run lint && npm test"
   },
   "keywords": [
@@ -44,9 +44,16 @@
     "filemanager-view.js",
     "pdf-view.js",
     "i18n.js",
+    "connections.js",
+    "smb-errors.js",
+    "plugin-config.js",
+    "view-common.js",
+    "view-token.js",
+    "view-binding.js",
     "i18n/",
     "public/",
     "tools/",
+    "docs/",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"

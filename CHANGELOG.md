@@ -4,7 +4,160 @@ All notable changes to `saltcorn-samba` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.4.16] – 2026-07-08
+## [0.6.0] – 2026-10-10
+
+### Security – View-Bindung (signierte View-Tokens)
+
+Bis 0.5.0 vertrauten die Datei-Routen `conn` und `path` aus dem Browser:
+Jeder Nutzer mit ausreichender Rolle konnte per manipuliertem Request jede
+Verbindung und jeden Ordner (innerhalb des Basispfads) lesen und – mit
+Schreibrolle – verändern, auch wenn er nur eine View auf „seinen“ Ordner
+sehen durfte.
+
+- Neu `view-token.js` (HMAC-SHA256, timing-sicherer Vergleich, ohne
+  Abhängigkeiten) und `view-binding.js` (Schlüssel aus `session_secret`
+  bzw. eigenem Geheimnis, pro Mandant abgeleitet; Modus; Laufzeit).
+- Views stellen beim Rendern ein Token aus: Verbindung, Startordner,
+  Schreiben / versteckte Dateien / smb://-Links, User-ID, Ablauf.
+- Alle Routen prüfen Signatur, Ablauf, Benutzer und Bereich
+  (`inScope()`, Segmentgrenzen); Startordner nicht lösch-/umbenennbar;
+  Umbenennen nach außerhalb gesperrt; Rechte = Verbindung UND View.
+- Gleitende Verlängerung über Antwort-Header `X-Samba-View-Token`.
+- Browser: `SambaCommon.viewFetch()` (Token-Header, CSRF, Verlängerung,
+  übersetzte Meldung „Ansicht abgelaufen – Seite neu laden“);
+  `apiUrl()` hängt `vt` an Links an.
+- Konfiguration (Schritt 2): *Zugriff nur über Views* (`required` /
+  `optional`), *Gültigkeit eines View-Tokens (Stunden)*, *Geheimnis für
+  View-Tokens (optional)*.
+- File-Manager: View-Option *Nur lesen (diese View)*. Tree: immer lesend.
+
+### Security – Verbindungstest ohne Anmeldung nutzbar
+
+`/sambatest` akzeptierte als Admin-Nachweis auch einen `Referer`, der auf
+`/plugins/configure` zeigt. Der Header ist frei setzbar – die Route war
+damit ohne Login nutzbar (Verbindungsaufbau zu beliebigen Hosts,
+Auflisten der gespeicherten Freigabe). Referer-Fallback und `noCsrf`
+entfernt; Diagnose-Antwort enthält keine Session-ID und E-Mail mehr;
+Ausgaben im Testskript werden HTML-escaped.
+
+### Security – Gespeichertes XSS über Dateien vom Share
+
+HTML-/SVG-Dateien wurden inline mit ihrem echten Typ auf der
+Saltcorn-Domain ausgeliefert. Jetzt: inline nur PDF, Rasterbilder und Text
+(als `text/plain`); alles andere nur in einer CSP-Sandbox;
+`X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+`Cross-Origin-Resource-Policy: same-origin`, `frame-ancestors 'self'`,
+`Content-Disposition` nach RFC 6266/5987.
+
+### Security – Datensatz ohne Rechteprüfung / Rückfall auf Elternordner
+
+- `run()` lud den Datensatz mit `table.getRow(state)` ohne Saltcorns
+  Zeilenrechte; ein State ohne passende Spalten lieferte die erste Zeile
+  der Tabelle. Neu `loadRowForView()`: nur Tabellenspalten, `forUser` /
+  `forPublic`.
+- Im Modus *Pfad aus Feld* fiel die View ohne Datensatz oder Ordnerwert
+  still auf `view_base_path` zurück (z. B. Ordner aller Kunden). Jetzt
+  Fehlermeldung (`assertRowPath()`, fail closed).
+
+### Added
+
+- `test/view-token.test.js` (31 Tests). Gesamt: 128 Unit-Tests.
+
+### Upgrade-Hinweise
+
+- Offene Tabs mit Samba-Views neu laden.
+- Eigene Skripte gegen die Routen: View-Token verwenden oder Modus
+  `optional` setzen.
+- Views im Modus *Pfad aus Feld* ohne Datensatz zeigen jetzt eine Meldung.
+
+## [0.5.0] – 2026-10-02
+
+### Fixed – Upload erzeugte 0-Byte-Dateien
+
+Saltcorn bindet `express-fileupload` mit `useTempFiles: true` ein. Der
+Dateiinhalt liegt dann in `tempFilePath`, `file.data` ist ein **leerer**
+Buffer. Das Plugin schrieb `file.data` → auf dem Share landeten leere
+Dateien, die Route meldete trotzdem Erfolg (mit der Größe aus `file.size`).
+
+- Inhalt wird jetzt aus `tempFilePath` gelesen (Fallback `data`).
+- Nach dem Schreiben wird die Dateigröße auf dem Share per `stat` gegen-
+  geprüft; Abweichung → Fehler statt „OK“.
+- `file.truncated` (Saltcorn-Upload-Limit überschritten) wird gemeldet.
+- Temp-Dateien werden immer entfernt – auch bei abgelehnten Requests.
+- Bei aktivem S3-Storage (multer, `req.files` als Array) klare Fehlermeldung (501).
+
+### Fixed – Upload / „Neuer Ordner“ scheiterten mit 403
+
+`/sambadir` meldete `allowUpload`/`allowMkdir` … als `cfg.allow_x !== false`
+(nicht gesetzt ⇒ Button sichtbar), die Schreibrouten prüften `!cfg.allow_x`
+(nicht gesetzt ⇒ 403 „Uploads disabled“ / „Mkdir disabled“). Beide nutzen
+jetzt `permissionsFor()` aus `connections.js`; Checkbox-Werte (`true`,
+`"on"`, `1`) werden einheitlich über `isEnabled()` ausgewertet.
+
+**Verhaltensänderung:** Schreib-Buttons erscheinen nur noch, wenn die Aktion
+in Schritt 2 *Zugriff & Berechtigungen* tatsächlich aktiviert ist.
+
+### Fixed – Konfiguration unter anderem Installationsnamen
+
+Die Plugin-Konfiguration wurde über feste Schlüssel gesucht
+(`saltcorn-samba@<version>`, …) und bei Installation aus GitHub/lokal unter
+anderem Namen nicht gefunden. `plugin-config.js` findet das eigene Manifest
+jetzt in `getState().plugins`; zusätzlich merken sich `routes(cfg)` und
+`viewtemplates(cfg)` die von Saltcorn übergebene Konfiguration.
+
+### Added – Mehrere Samba-Verbindungen
+
+- Neuer Konfigurationsschritt **„Weitere Verbindungen“** (Saltcorn
+  `FieldRepeat`): Kennung, Anzeigename, Server, Freigabe, Domäne,
+  Zugangsdaten, Basispfad, Port, Signing/Verschlüsselung, öffentlicher
+  SMB-Host, *Nur lesen*, optionale Mindestrollen.
+- Die bisherigen Felder bilden die Verbindung **`default`** – keine Migration.
+- Views: neue Felder *Samba-Verbindung* und *Verbindung aus Feld*
+  (Kennung pro Datensatz); Badge mit Anzeigename im View-Kopf.
+- Alle Routen akzeptieren `conn` (Query bzw. Body); unbekannt → 404,
+  ungültig → 400.
+- Verbindungstest pro Zusatzverbindung im Wizard; leeres Passwortfeld nutzt
+  das gespeicherte Passwort derselben Verbindung.
+- Fieldview `samba_pdf`: Option `connection`.
+- Neue Module `connections.js`, `plugin-config.js`, `smb-errors.js`,
+  `view-common.js`; neue Testdatei `test/connections.test.js` (40 Tests).
+- Konzeptpapier `docs/KONZEPT-mehrere-verbindungen.md`.
+
+### Changed
+
+- SMB-Fehler werden in verständliche deutsche Meldungen übersetzt
+  (`smb-errors.js`), Originalstatus bleibt in Klammern erhalten.
+- „Ordner existiert bereits“ → HTTP 409 statt 500.
+- Gemeinsamer View-Code (Startpfad, CSRF, Katalog, Bootstrap-Skript) liegt in
+  `view-common.js`; `filemanager-view.js` und `tree-view.js` duplizieren ihn
+  nicht mehr. Der Test für `computeStartPath` nutzt die echte Funktion.
+- Browser: URLs entstehen zentral über `SambaCommon.apiUrl()`;
+  Fehlermeldungen werden per `textContent` statt `innerHTML` ausgegeben.
+- CI-Matrix auf Node 20/22 (entspricht `engines`).
+- README: Routen-Tabelle korrigiert (tatsächliche Parameternamen).
+
+## [0.4.16] – 2026-07-09
+
+### Added – Gemeinsamer i18n-Kern (`public/samba-i18n-runtime.js`)
+
+Die `interpolate()`- und `translate()`-Logik lag zwischen `i18n.js` (Server)
+und `public/samba-common.js` (Browser) ursprünglich zweimal parallel. Ab jetzt
+teilen sich beide Seiten **exakt dieselbe Datei**.
+
+- Neue Datei `public/samba-i18n-runtime.js` mit UMD-Wrapper: Node bekommt sie
+  via `require("./public/samba-i18n-runtime")`, der Browser über
+  `<script src=".../samba-i18n-runtime.js">` (hängt sich an
+  `window.SambaI18nRuntime`).
+- Exportiert `interpolate(msg, params)` und
+  `translate(key, params, catalogs)` – eine geordnete Katalog-Liste erlaubt
+  Server und Browser, unterschiedliche Fallback-Ketten aufzubauen, ohne die
+  Kern-Logik zu duplizieren.
+- `i18n.js` reicht `[localeCatalog, enCatalog]` durch; `samba-common.js` reicht
+  `[injectedCatalog]` durch.
+- View-Shells (`filemanager-view.js`, `tree-view.js`) laden jetzt in drei
+  Stufen: `samba-i18n-runtime.js` → `samba-common.js` (Katalog setzen) →
+  view-spezifische JS-Datei. Bereits geladene Skripte werden übersprungen.
+- Reine ES5, keine externen Dependencies.
 
 ### Added – Internationalisierung (Deutsch + Englisch)
 

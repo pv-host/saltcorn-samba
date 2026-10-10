@@ -41,17 +41,17 @@ function isImage(name) {
  * Build a download URL served by the plugin route (defined in index.js).
  * `disposition` is "inline" or "attachment".
  */
-function fileUrl(value, disposition = "inline") {
-  const q = new URLSearchParams({
-    path: value || "",
-    disposition,
-  }).toString();
-  return `/sambafile?${q}`;
+function fileUrl(value, disposition = "inline", conn) {
+  const params = { path: value || "", disposition };
+  if (conn && conn !== "default") params.conn = conn;
+  return `/sambafile?${new URLSearchParams(params).toString()}`;
 }
 
 /** smb:// link for external file managers (Nemo, Nautilus, Explorer). */
-function smbUrl(value) {
-  return `/sambalink?path=${encodeURIComponent(value || "")}`;
+function smbUrl(value, conn) {
+  const params = { path: value || "" };
+  if (conn && conn !== "default") params.conn = conn;
+  return `/sambalink?${new URLSearchParams(params).toString()}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +63,13 @@ const samba_pdf = {
   description:
     "Show a file stored on the Samba share. PDFs are embedded inline; other files get open/download buttons.",
   configFields: () => [
+    {
+      name: "connection",
+      label: "Samba-Verbindung (Kennung)",
+      type: "String",
+      default: "default",
+      sublabel: "Kennung aus der Plugin-Konfiguration; leer = default.",
+    },
     {
       name: "height",
       label: "Viewer height (px)",
@@ -100,7 +107,7 @@ const samba_pdf = {
       buttons.push(
         a(
           {
-            href: fileUrl(safeVal, "attachment"),
+            href: fileUrl(safeVal, "attachment", options.connection),
             class: "btn btn-sm btn-outline-secondary me-2",
           },
           i({ class: "fas fa-download me-1" }),
@@ -112,7 +119,7 @@ const samba_pdf = {
       buttons.push(
         a(
           {
-            href: smbUrl(safeVal),
+            href: smbUrl(safeVal, options.connection),
             class: "btn btn-sm btn-outline-primary me-2",
             title: _t("pdf.open_in_fm_title"),
           },
@@ -124,7 +131,7 @@ const samba_pdf = {
     buttons.push(
       a(
         {
-          href: fileUrl(safeVal, "inline"),
+          href: fileUrl(safeVal, "inline", options.connection),
           target: "_blank",
           class: "btn btn-sm btn-outline-secondary",
         },
@@ -138,12 +145,12 @@ const samba_pdf = {
       body = "";
     } else if (isPdf(safeVal)) {
       body = iframe({
-        src: fileUrl(safeVal, "inline"),
+        src: fileUrl(safeVal, "inline", options.connection),
         style: `width:100%;height:${height}px;border:1px solid #dee2e6;border-radius:4px;`,
       });
     } else if (isImage(safeVal)) {
       body = img({
-        src: fileUrl(safeVal, "inline"),
+        src: fileUrl(safeVal, "inline", options.connection),
         style: `max-width:100%;max-height:${height}px;border:1px solid #dee2e6;border-radius:4px;`,
         alt: safeVal,
       });

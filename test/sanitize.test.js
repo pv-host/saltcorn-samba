@@ -111,25 +111,9 @@ t("toSmbUrl encodes", () => {
 });
 
 // ==== view computeStartPath (view_base_path composition) ===================
-// Re-require the view modules to exercise their computeStartPath. Since
-// computeStartPath is not exported, we replicate the exact composition here
-// against the shared sanitizeRelativePath and treat any drift as a test bug
-// to fix in both places.
-function viewCompose(cfg, row) {
-  const parts = [];
-  if (cfg.view_base_path) parts.push(String(cfg.view_base_path));
-  if (cfg.mode === "from_field" && cfg.path_field && row) {
-    const v = row[cfg.path_field];
-    if (v) parts.push(String(v));
-  }
-  if (cfg.mode === "from_field" && cfg.extra_subpath)
-    parts.push(String(cfg.extra_subpath));
-  const joined = parts
-    .map((p) => p.replace(/^\/+|\/+$/g, ""))
-    .filter(Boolean)
-    .join("/");
-  return sanitizeRelativePath(joined);
-}
+// Seit v0.5.0 liegt computeStartPath zentral in view-common.js und wird
+// hier direkt getestet (vorher: Nachbau im Test, Gefahr des Auseinanderlaufens).
+const { computeStartPath: viewCompose } = require("../view-common");
 
 t("view: only view_base_path (static)", () =>
   assert.strictEqual(

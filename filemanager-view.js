@@ -9,7 +9,12 @@
  * All directory data is fetched lazily from `/sambadir` (defined in the
  * plugin's routes) so the view itself just renders a shell that boots the
  * client-side script.
+ *
+ * Ab v0.5.0 wählt jede View eine Samba-Verbindung (Server + Freigabe) aus der
+ * Plugin-Konfiguration – statisch oder pro Zeile aus einem Tabellenfeld.
  */
+
+"use strict";
 
 const { div, span, script } = require("@saltcorn/markup/tags");
 const Workflow = require("@saltcorn/data/models/workflow");
@@ -17,12 +22,36 @@ const Form = require("@saltcorn/data/models/form");
 const Field = require("@saltcorn/data/models/field");
 const Table = require("@saltcorn/data/models/table");
 
-const { sanitizeRelativePath } = require("./smb-client");
-const { catalogFor, resolveLocaleFromReq } = require("./i18n");
+const { getPluginConfig } = require("./plugin-config");
+const { resolveConnection } = require("./connections");
+const {
+  computeStartPath,
+  resolveViewConnection,
+  connectionConfigFields,
+  extractCsrf,
+  resolveLocaleAndCatalog,
+  bootstrapScript,
+  loadRowForView,
+  assertRowPath,
+  viewTokenFor,
+} = require("./view-common");
 
 // ---------------------------------------------------------------------------
 // Configuration workflow
 // ---------------------------------------------------------------------------
+
+/** Namen aller Text-Felder der Tabelle (für path_field / connection_field). */
+async function stringFieldsOf(table_id) {
+  const table = table_id ? await Table.findOne({ id: table_id }) : null;
+  const fields = table ? await table.getFields() : [];
+  return fields
+    .filter(
+      (f) =>
+        f.type &&
+        (f.type.name === "String" || f.type === "String" || f.type.name === "Text")
+    )
+    .map((f) => f.name);
+}
 
 const configuration_workflow = () =>
   new Workflow({
@@ -30,28 +59,17 @@ const configuration_workflow = () =>
       {
         name: "File manager options",
         form: async (context) => {
-          const table = context.table_id
-            ? await Table.findOne({ id: context.table_id })
-            : null;
-          const fields = table ? await table.getFields() : [];
-          const stringFieldOptions = fields
-            .filter(
-              (f) =>
-                f.type &&
-                (f.type.name === "String" ||
-                  f.type === "String" ||
-                  f.type.name === "Text")
-            )
-            .map((f) => f.name);
+          const stringFieldOptions = await stringFieldsOf(context.table_id);
           return new Form({
             fields: [
+              ...connectionConfigFields(Field, getPluginConfig(), stringFieldOptions),
               new Field({
                 name: "view_base_path",
-                label: "View-Basispfad (relativ zum Plugin-Basispfad)",
+                label: "View-Basispfad (relativ zum Basispfad der Verbindung)",
                 type: "String",
                 sublabel:
-                  "Optional. Statischer Pfad relativ zum Plugin-Basispfad, der f\u00fcr diese View gilt. " +
-                  "Beispiel: Plugin-Basispfad = 'static', View-Basispfad = 'projekte/2026' \u2192 View listet 'static/projekte/2026'. " +
+                  "Optional. Statischer Pfad relativ zum Basispfad der gew\u00e4hlten Verbindung. " +
+                  "Beispiel: Basispfad = 'static', View-Basispfad = 'projekte/2026' \u2192 View listet 'static/projekte/2026'. " +
                   "Keine f\u00fchrenden/abschlie\u00dfenden Slashes n\u00f6tig. Traversal (\u201e..\u201c) wird abgelehnt.",
               }),
               new Field({
@@ -59,9 +77,7 @@ const configuration_workflow = () =>
                 label: "Row-Modus",
                 type: "String",
                 required: true,
-                attributes: {
-                  options: ["static", "from_field"],
-                },
+                attributes: { options: ["static", "from_field"] },
                 sublabel:
                   "static = immer nur der View-Basispfad. from_field = h\u00e4nge einen Feldwert der aktuellen Zeile an " +
                   "(nur sinnvoll, wenn die View in einer Show-View eingebettet ist).",
@@ -82,16 +98,20 @@ const configuration_workflow = () =>
                   "Optional. Statischer Suffix, der nach dem Feldwert angeh\u00e4ngt wird. Beispiel: 'invoices'.",
                 showIf: { mode: "from_field" },
               }),
-              new Field({
-                name: "show_hidden",
-                label: "Show hidden files",
-                type: "Bool",
-              }),
+              new Field({ name: "show_hidden", label: "Show hidden files", type: "Bool" }),
               new Field({
                 name: "allow_navigate_up",
                 label: "Allow navigating up (until the root)",
                 type: "Bool",
                 default: true,
+              }),
+              new Field({
+                name: "view_read_only",
+                label: "Nur lesen (diese View)",
+                sublabel:
+                  "Blendet Upload, Löschen, Umbenennen und Ordner anlegen aus und sperrt sie serverseitig " +
+                  "für Zugriffe aus dieser View – auch wenn Rolle und Verbindung Schreiben erlauben.",
+                type: "Bool",
               }),
               new Field({
                 name: "pdf_inline",
@@ -126,45 +146,8 @@ const configuration_workflow = () =>
     ],
   });
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 async function get_state_fields() {
   return [];
-}
-
-/**
- * Compose the start path (relative to the plugin base_path) from three
- * optional parts:
- *   1. `view_base_path`  — static, per-view prefix
- *   2. row field value    — only in "from_field" mode
- *   3. `extra_subpath`   — static suffix, only in "from_field" mode
- *
- * Empty parts are dropped. The final joined path is passed through
- * sanitizeRelativePath so traversal / absolute paths / backslashes are
- * rejected consistently.
- */
-function computeStartPath(configuration, row) {
-  const parts = [];
-  if (configuration.view_base_path) {
-    parts.push(String(configuration.view_base_path));
-  }
-  if (configuration.mode === "from_field" && configuration.path_field && row) {
-    const v = row[configuration.path_field];
-    if (v) parts.push(String(v));
-  }
-  if (
-    configuration.mode === "from_field" &&
-    configuration.extra_subpath
-  ) {
-    parts.push(String(configuration.extra_subpath));
-  }
-  const joined = parts
-    .map((p) => p.replace(/^\/+|\/+$/g, ""))
-    .filter(Boolean)
-    .join("/");
-  return sanitizeRelativePath(joined);
 }
 
 // ---------------------------------------------------------------------------
@@ -172,22 +155,22 @@ function computeStartPath(configuration, row) {
 // ---------------------------------------------------------------------------
 
 /**
- * Serialisiert den i18n-Katalog inline in die Seite. Alternative w\u00e4re ein
- * zus\u00e4tzlicher HTTP-Roundtrip auf /samba-i18n.json — inline spart einen
- * Request und rendert die Oberfl\u00e4che ohne Aufblitzen englischer Keys.
- * `</script>` wird escaped, damit das JSON-Blob den HTML-Parser nicht t\u00f6tet.
+ * @param {object} p
+ * @param {string} p.startPath
+ * @param {object} p.connection     aufgelöste Verbindung (nur name/label werden genutzt!)
+ * @param {object} p.configuration  View-Konfiguration
  */
-function serialiseCatalog(catalog) {
-  return JSON.stringify(catalog || {}).replace(/</g, "\\u003c");
-}
-
-function renderShell(startPath, configuration, pluginVersion, csrfToken, locale, catalog) {
+function renderShell(p) {
+  const { startPath, connection, configuration, pluginVersion, csrfToken, locale, catalog, viewToken } = p;
   const id = "samba-fm-" + Math.random().toString(36).slice(2, 10);
-  // Panel-Titel: wenn der User keinen eigenen Titel gesetzt hat, greift die
-  // \u00fcbersetzte Default-Bezeichnung aus dem i18n-Katalog.
+  // Panel-Titel: ohne eigenen Titel greift die übersetzte Standardbezeichnung.
   const defaultTitle = (catalog && catalog["fm.title_default"]) || "Samba files";
+  // Achtung: an den Browser gehen nur Kennung und Anzeigename der Verbindung –
+  // niemals Server, Benutzer oder Passwort.
   const opts = {
     startPath,
+    connection: connection.name,
+    connectionLabel: connection.label,
     showHidden: !!configuration.show_hidden,
     allowNavigateUp: configuration.allow_navigate_up !== false,
     pdfInline: configuration.pdf_inline !== false,
@@ -195,20 +178,21 @@ function renderShell(startPath, configuration, pluginVersion, csrfToken, locale,
     pageSize: Number(configuration.page_size) || 0,
     title: configuration.title || defaultTitle,
     csrfToken: csrfToken || "",
+    // Signiertes View-Token: bindet alle Requests an Verbindung,
+    // Startordner und Rechte DIESER View-Instanz (siehe view-token.js).
+    viewToken,
     locale: locale || "en",
   };
 
-  // Zwei-Stufen-Bootstrap:
-  //   1. samba-common.js laden (SambaCommon global) und Katalog setzen
-  //   2. samba-filemanager.js laden und mounten
-  // Wenn beide Skripte bereits geladen sind, wird nur remounted.
-  const catalogJson = serialiseCatalog(catalog);
   return (
     div(
-      { class: "samba-fm card" },
+      { class: "samba-fm card", "data-samba-connection": connection.name },
       div(
         { class: "card-header d-flex align-items-center" },
         span({ class: "samba-fm-title fw-bold" }, opts.title),
+        connection.name !== "default"
+          ? span({ class: "badge bg-secondary ms-2 samba-fm-conn" }, connection.label)
+          : "",
         span({ class: "samba-fm-spacer flex-grow-1" }),
         span({ id: id + "-count", class: "text-muted small" })
       ),
@@ -220,97 +204,74 @@ function renderShell(startPath, configuration, pluginVersion, csrfToken, locale,
       )
     ) +
     script(
-      `(function(){
-         var CATALOG=${catalogJson};
-         function applyCatalog(){ if(window.SambaCommon && window.SambaCommon.setCatalog) window.SambaCommon.setCatalog(CATALOG); }
-         function mount(){window.saltcornSambaMountFM && window.saltcornSambaMountFM(${JSON.stringify(
-           id
-         )}, ${JSON.stringify(opts)});}
-         function loadFM(){
-           if(window.saltcornSambaMountFM){ mount(); return; }
-           var s=document.createElement('script');
-           s.src='/plugins/public/saltcorn-samba@${pluginVersion}/samba-filemanager.js';
-           s.onload=mount;
-           document.head.appendChild(s);
-         }
-         if(window.SambaCommon){ applyCatalog(); loadFM(); return; }
-         var c=document.createElement('script');
-         c.src='/plugins/public/saltcorn-samba@${pluginVersion}/samba-common.js';
-         c.onload=function(){ applyCatalog(); loadFM(); };
-         document.head.appendChild(c);
-       })();`
+      bootstrapScript({
+        pluginVersion,
+        catalog,
+        viewScript: "samba-filemanager.js",
+        readyGlobal: "saltcornSambaMountFM",
+        mountExpression:
+          `window.saltcornSambaMountFM(${JSON.stringify(id)}, ${JSON.stringify(opts).replace(/</g, "\\u003c")})`,
+      })
     )
   );
+}
+
+/** Fehlerbox, wenn Pfad oder Verbindung der View nicht auflösbar sind. */
+function renderError(message) {
+  return div({ class: "alert alert-danger" }, "Samba file manager: " + message);
+}
+
+/** Rendert eine View-Instanz für genau eine Zeile (oder ohne Zeile). */
+function renderFor(viewname, configuration, row, extra) {
+  const pluginVersion = configuration.__pluginVersion || "0.6.0";
+  let connection;
+  let startPath;
+  let viewToken;
+  try {
+    assertRowPath(configuration, row);
+    connection = resolveConnection(getPluginConfig(), resolveViewConnection(configuration, row));
+    startPath = computeStartPath(configuration, row || {});
+    viewToken = viewTokenFor({
+      req: extra && extra.req,
+      viewname,
+      connection: connection.name,
+      startPath,
+      write: !configuration.view_read_only,
+      hidden: true, // der File-Manager hat einen eigenen Schalter „versteckte Dateien“
+      smbLink: configuration.expose_smb_link !== false,
+    });
+  } catch (e) {
+    return renderError(e.message);
+  }
+  const { locale, catalog } = resolveLocaleAndCatalog(extra);
+  return renderShell({
+    startPath,
+    connection,
+    configuration,
+    pluginVersion,
+    csrfToken: extractCsrf(extra),
+    locale,
+    catalog,
+    viewToken,
+  });
 }
 
 // ---------------------------------------------------------------------------
 // View functions
 // ---------------------------------------------------------------------------
 
-function extractCsrf(extra) {
-  const req = extra && extra.req;
-  if (req && typeof req.csrfToken === "function") {
-    try {
-      return req.csrfToken();
-    } catch (_) {
-      return "";
-    }
-  }
-  return "";
-}
-
-/**
- * Liest die vom Nutzer bevorzugte Sprache aus dem Request (Saltcorn setzt
- * das aus Login-Cookie / Accept-Language) und liefert Locale + Katalog. Bei
- * Ausfall greift `en` als Notnagel – hardgecodete Strings werden nie leer.
- */
-function resolveLocaleAndCatalog(extra) {
-  const req = extra && extra.req;
-  const locale = resolveLocaleFromReq(req);
-  return { locale, catalog: catalogFor(locale) };
-}
-
 async function run(table_id, viewname, configuration, state, extra) {
-  const pluginVersion = configuration.__pluginVersion || "0.3.0";
-  const csrf = extractCsrf(extra);
-  const { locale, catalog } = resolveLocaleAndCatalog(extra);
   let row = extra && extra.row;
-  if (!row && configuration.mode === "from_field" && table_id) {
+  if (!row && (configuration.mode === "from_field" || configuration.connection_field) && table_id) {
     const table = await Table.findOne({ id: table_id });
-    if (table && state && Object.keys(state).length) {
-      try {
-        row = await table.getRow(state);
-      } catch (_) {
-        row = null;
-      }
-    }
+    row = await loadRowForView(table, state, extra && extra.req);
   }
-  let startPath = "";
-  try {
-    startPath = computeStartPath(configuration, row || {});
-  } catch (e) {
-    return div({ class: "alert alert-danger" }, "Samba file manager: " + e.message);
-  }
-  return renderShell(startPath, configuration, pluginVersion, csrf, locale, catalog);
+  return renderFor(viewname, configuration, row, extra);
 }
 
 async function runMany(table_id, viewname, configuration, state, extra) {
-  const pluginVersion = configuration.__pluginVersion || "0.3.0";
-  const csrf = extractCsrf(extra);
-  const { locale, catalog } = resolveLocaleAndCatalog(extra);
   const rows = (extra && extra.rows) || [];
-  return rows.map((row) => {
-    let startPath = "";
-    try {
-      startPath = computeStartPath(configuration, row);
-    } catch (_) {
-      startPath = "";
-    }
-    return {
-      html: renderShell(startPath, configuration, pluginVersion, csrf, locale, catalog),
-      row,
-    };
-  });
+  return rows.map((row) => ({ html: renderFor(viewname, configuration, row, extra), row }));
 }
 
 module.exports = {

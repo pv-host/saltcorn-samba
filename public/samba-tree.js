@@ -40,14 +40,12 @@
     return el;
   }
 
-  /** GET /sambadir für ein Verzeichnis. Wirft bei nicht-OK-Antworten. */
-  async function fetchDirectory(path, showHidden) {
-    var url =
-      "/sambadir?path=" + encodeURIComponent(path || "") +
-      (showHidden ? "&show_hidden=1" : "");
-    var response = await fetch(url, { credentials: "same-origin" });
-    if (!response.ok) throw new Error("HTTP " + response.status);
-    return response.json();
+  /** GET /sambadir für ein Verzeichnis der View `view` (über SambaCommon.viewFetch). */
+  function fetchDirectory(path, showHidden, view) {
+    return C.viewFetch(view, C.apiUrl("/sambadir", {
+      path: path || "",
+      show_hidden: showHidden ? "1" : undefined,
+    }, view));
   }
 
   /**
@@ -97,7 +95,7 @@
           "a",
           {
             class: "samba-tree-external btn btn-sm btn-link p-0 ms-2",
-            href: "/sambalink?path=" + encodeURIComponent(fullPath),
+            href: C.apiUrl("/sambalink", { path: fullPath }, opts),
             target: "_blank",
             title: C.t("tree.open_in_fm_title"),
             text: "↗",
@@ -118,7 +116,7 @@
           return;
         }
         toggle.textContent = "…";
-        fetchDirectory(fullPath, opts.showHidden)
+        fetchDirectory(fullPath, opts.showHidden, opts)
           .then(function (data) {
             renderLevel(childrenBox, fullPath, data.items || [], opts, viewerElement);
             childrenBox.dataset.loaded = "1";
@@ -126,8 +124,10 @@
             toggle.textContent = "▾";
           })
           .catch(function (err) {
-            childrenBox.innerHTML =
-              '<div class="text-danger small">' + C.t("tree.error_prefix") + err.message + "</div>";
+            childrenBox.innerHTML = "";
+            childrenBox.appendChild(element("div", {
+              class: "text-danger small", text: C.t("tree.error_prefix") + err.message,
+            }, []));
             childrenBox.dataset.loaded = "1";
             toggle.textContent = "▸";
           });
@@ -141,7 +141,7 @@
         if (!viewerElement) return;
         if (opts.pdfInline && C.isViewable(item.name)) {
           var streamUrl =
-            "/sambafile?path=" + encodeURIComponent(fullPath) + "&disposition=inline";
+            C.apiUrl("/sambafile", { path: fullPath, disposition: "inline" }, opts);
           var isImage = /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(item.name);
           viewerElement.innerHTML = "";
           var header = element(
@@ -163,9 +163,7 @@
                 "a",
                 {
                   href:
-                    "/sambafile?path=" +
-                    encodeURIComponent(fullPath) +
-                    "&disposition=attachment",
+                    C.apiUrl("/sambafile", { path: fullPath, disposition: "attachment" }, opts),
                   class: "btn btn-sm btn-outline-secondary me-2",
                   text: C.t("fm.download"),
                 },
@@ -175,7 +173,7 @@
                 ? element(
                     "a",
                     {
-                      href: "/sambalink?path=" + encodeURIComponent(fullPath),
+                      href: C.apiUrl("/sambalink", { path: fullPath }, opts),
                       target: "_blank",
                       class: "btn btn-sm btn-outline-primary",
                       text: C.t("tree.open_in_fm"),
@@ -213,7 +211,7 @@
           }
         } else {
           // Nicht inline-fähig: Klassischer Sprung in die smb://-Zwischenseite.
-          window.open("/sambalink?path=" + encodeURIComponent(fullPath), "_blank");
+          window.open(C.apiUrl("/sambalink", { path: fullPath }, opts), "_blank");
         }
       };
 
@@ -267,13 +265,16 @@
     }
     root.innerHTML =
       '<div class="text-muted small p-2">' + C.t("ui.loading") + "</div>";
-    fetchDirectory(opts.startPath || "", opts.showHidden)
+    fetchDirectory(opts.startPath || "", opts.showHidden, opts)
       .then(function (data) {
         renderLevel(root, opts.startPath || "", data.items || [], opts, viewer);
       })
       .catch(function (err) {
-        root.innerHTML =
-          '<div class="alert alert-danger">' + C.t("tree.samba_prefix") + err.message + "</div>";
+        // textContent: Fehlermeldungen können Pfadnamen vom Server enthalten.
+        root.innerHTML = "";
+        root.appendChild(element("div", {
+          class: "alert alert-danger", text: C.t("tree.samba_prefix") + err.message,
+        }, []));
       });
   }
 

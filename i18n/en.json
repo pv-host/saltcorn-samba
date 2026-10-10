@@ -4,7 +4,6 @@
     "locale": "en",
     "note": "Translation catalogue for saltcorn-samba. Dot notation groups keys by area."
   },
-
   "ui.loading": "Loading…",
   "ui.close": "Close",
   "ui.cancel": "Cancel",
@@ -21,7 +20,6 @@
   "ui.page_of": "Page {page} / {total}",
   "ui.prev_page": "‹",
   "ui.next_page": "›",
-
   "fm.title_default": "Samba files",
   "fm.col.filename": "Filename",
   "fm.col.media_type": "Media type",
@@ -42,7 +40,6 @@
   "fm.upload_title": "Upload files to this directory",
   "fm.new_folder": "+ Folder",
   "fm.new_folder_title": "Create new folder",
-
   "fm.confirm_delete.title": "Confirm delete",
   "fm.confirm_delete.prompt_prefix": "Delete \"",
   "fm.confirm_delete.prompt_suffix": "\"?",
@@ -50,20 +47,17 @@
   "fm.confirm_delete.file_hint": "This action cannot be undone.",
   "fm.deleted_ok": "Deleted {name}",
   "fm.deleted_fail": "Delete failed: {msg}",
-
   "fm.rename.title": "Rename \"{name}\"",
   "fm.rename.label": "New name",
   "fm.rename.hint": "Slashes are not allowed. To move, use the ↗ file-manager link instead.",
   "fm.renamed_ok": "Renamed to {name}",
   "fm.rename_fail": "Rename failed: {msg}",
-
   "fm.mkdir.title": "Create folder in {path}",
   "fm.mkdir.label": "Folder name",
   "fm.mkdir.placeholder": "New folder name",
   "fm.mkdir.create": "Create",
   "fm.mkdir_ok": "Created folder {name}",
   "fm.mkdir_fail": "Create folder failed: {msg}",
-
   "fm.upload.title": "Upload files",
   "fm.upload.dropzone": "Drop files here or click to select",
   "fm.upload.into_prefix": "Uploading to ",
@@ -78,16 +72,15 @@
   "fm.upload.some_failed": "Some uploads failed",
   "fm.upload.failed": "Upload failed: {msg}",
   "fm.upload.failed_short": "Upload failed",
-
   "tree.open_in_fm": "Open in file manager",
   "tree.open_in_fm_title": "Open in file manager",
   "tree.error_prefix": "Error: ",
   "tree.samba_prefix": "Samba: ",
   "tree.open_new_tab": "Open in new tab",
-
   "pdf.download": "Download",
   "pdf.open_in_fm": "Open in file manager",
   "pdf.open_in_fm_title": "Open in Nemo/Nautilus/Explorer",
   "pdf.open_new_tab": "Open in new tab",
-  "pdf.empty": "—"
+  "pdf.empty": "—",
+  "ui.view_expired": "This view has expired or is no longer valid. Please reload the page."
 }
