@@ -11,6 +11,9 @@ const {
   isEnabled,
   normaliseConnectionName,
   buildConnections,
+  connectionEntriesForForm,
+  isListFormat,
+  CONNECTION_KEYS,
   listConnections,
   resolveConnection,
   connectionOptions,
@@ -93,7 +96,7 @@ runTest("build: doppelte Kennung → Problem, erster Eintrag gewinnt", () => {
   assert.strictEqual(connections.archiv.server, "srv2");
   assert.ok(problems.some((p) => /archiv/.test(p)));
 });
-runTest("build: 'default' als Zusatz-Kennung reserviert", () => {
+runTest("Altformat: Listeneintrag 'default' kollidiert mit Einzelverbindung", () => {
   const { connections, problems } = byName({ ...BASE, connections: [{ name: "default", server: "evil", share: "x" }] });
   assert.strictEqual(connections.default.server, "srv1");
   assert.strictEqual(problems.length, 1);
@@ -188,6 +191,91 @@ runTest("smb-error: Netzwerk", () =>
   assert.ok(/nicht erreichbar/.test(explainSmbError(new Error("connect ECONNREFUSED"), { server: "srv9" }))));
 runTest("smb-error: unbekannt → Originaltext", () =>
   assert.strictEqual(explainSmbError(new Error("irgendwas")), "irgendwas"));
+
+// ==== Listenformat ab v0.7.0 =================================================
+const V2 = {
+  connections_v2: "1",
+  allow_upload: true,
+  // Altlasten aus früheren Versionen – müssen im Listenformat ignoriert werden:
+  server: "alt-server",
+  share: "alt-share",
+  password: "alt-pw",
+  connections: [
+    { name: "hq", label: "Zentrale", server: "srv-hq", share: "daten", password: "p-hq" },
+    { name: "werk2", server: "srv-w2", share: "daten" },
+  ],
+};
+runTest("v2: alte Einzelfelder werden ignoriert", () => {
+  const names = listConnections(V2).map((c) => c.name);
+  assert.deepStrictEqual(names, ["hq", "werk2"]);
+});
+runTest("v2: 'default' ohne Eintrag → erster Eintrag", () =>
+  assert.strictEqual(resolveConnection(V2, "default").name, "hq"));
+runTest("v2: leere Kennung → Standardverbindung", () =>
+  assert.strictEqual(resolveConnection(V2, "").name, "hq"));
+runTest("v2: default_connection wählt die Standardverbindung", () =>
+  assert.strictEqual(resolveConnection({ ...V2, default_connection: "werk2" }, "default").name, "werk2"));
+runTest("v2: default_connection unbekannt → Problem + erster Eintrag", () => {
+  const r = buildConnections({ ...V2, default_connection: "weg" });
+  assert.strictEqual(r.defaultName, "hq");
+  assert.ok(r.problems.some((p) => /weg/.test(p)));
+});
+runTest("v2: Eintrag namens 'default' ist normal nutzbar", () => {
+  const cfg = { ...V2, connections: [{ name: "x", server: "a", share: "b" }, { name: "default", server: "d", share: "e" }] };
+  assert.strictEqual(resolveConnection(cfg, "default").server, "d");
+});
+runTest("v2: gewählte Standardverbindung hat Vorrang vor Eintrag 'default'", () => {
+  const cfg = { ...V2, default_connection: "x", connections: [{ name: "x", server: "a", share: "b" }, { name: "default", server: "d", share: "e" }] };
+  assert.strictEqual(resolveConnection(cfg, "default").name, "x");
+});
+runTest("v2: Dropdown bietet 'default' (Standard) + alle Kennungen", () =>
+  assert.deepStrictEqual(connectionOptions(V2), ["default", "hq", "werk2"]));
+runTest("v2: fehlende Kennung → Problem", () => {
+  const r = buildConnections({ ...V2, connections: [{ server: "a", share: "b" }] });
+  assert.strictEqual(r.connections.length, 0);
+  assert.ok(/Kennung fehlt/.test(r.problems[0]));
+});
+runTest("isListFormat", () => {
+  assert.strictEqual(isListFormat(V2), true);
+  assert.strictEqual(isListFormat(BASE), false);
+});
+
+// ==== Übernahme bestehender Installationen ==================================
+runTest("Altformat: Formular zeigt Einzelverbindung als ersten Eintrag", () => {
+  const e = connectionEntriesForForm(BASE);
+  assert.deepStrictEqual(e.map((x) => x.name), ["default", "archiv", "ro", "admins"]);
+  assert.strictEqual(e[0].server, "srv1");
+  assert.strictEqual(e[0].password, "geheim");
+});
+runTest("Altformat: Laufzeit unverändert (ohne Speichern)", () => {
+  assert.strictEqual(resolveConnection(BASE, "default").server, "srv1");
+  assert.strictEqual(resolveConnection(BASE, "archiv").server, "srv2");
+});
+runTest("Speichern simuliert (Saltcorn: {...alt, ...neu}) → gleiche Auflösung", () => {
+  const values = { connections: connectionEntriesForForm(BASE), connections_v2: "1" };
+  for (const k of CONNECTION_KEYS) values[k] = "";
+  const saved = { ...BASE, ...values };
+  assert.strictEqual(isListFormat(saved), true);
+  for (const n of ["default", "archiv", "ro", "admins"]) {
+    const before = resolveConnection(BASE, n);
+    const after = resolveConnection(saved, n);
+    assert.strictEqual(after.server, before.server, n);
+    assert.strictEqual(after.share, before.share, n);
+    assert.strictEqual(String(after.password || ""), String(before.password || ""), n);
+    assert.strictEqual(after.read_only, before.read_only, n);
+    assert.strictEqual(after.min_role_read, before.min_role_read, n);
+  }
+  assert.strictEqual(saved.password, "", "altes Einzel-Passwort geleert");
+});
+runTest("Erneutes Öffnen nach dem Speichern: keine doppelte Übernahme", () => {
+  const values = { connections: connectionEntriesForForm(BASE), connections_v2: "1" };
+  const saved = { ...BASE, ...values };
+  assert.strictEqual(connectionEntriesForForm(saved).length, 4);
+});
+runTest("Leere Neuinstallation: keine Verbindung, kein Fehler", () => {
+  assert.deepStrictEqual(connectionEntriesForForm({}), []);
+  assert.deepStrictEqual(connectionOptions({}), ["default"]);
+});
 
 if (failed) {
   console.error(`\n${failed} test(s) failed`);

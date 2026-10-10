@@ -1,6 +1,6 @@
 {
   "name": "saltcorn-samba",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Saltcorn plugin: browse, upload, rename and delete files on one or more Samba/CIFS shares via SMB 3.1.1 (AES-CMAC signing, optional encryption). File-manager view, directory tree, inline PDF viewer, external-app open (smb://).",
   "main": "index.js",
   "scripts": {

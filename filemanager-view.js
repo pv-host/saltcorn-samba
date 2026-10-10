@@ -223,7 +223,7 @@ function renderError(message) {
 
 /** Rendert eine View-Instanz für genau eine Zeile (oder ohne Zeile). */
 function renderFor(viewname, configuration, row, extra) {
-  const pluginVersion = configuration.__pluginVersion || "0.6.0";
+  const pluginVersion = configuration.__pluginVersion || "0.7.0";
   let connection;
   let startPath;
   let viewToken;

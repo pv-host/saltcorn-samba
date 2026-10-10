@@ -129,7 +129,7 @@ async function get_state_fields() {
 function renderShell(p) {
   const { viewname, startPath, connection, configuration, locale, catalog, viewToken } = p;
   const treeId = `samba-tree-${Math.random().toString(36).slice(2, 10)}`;
-  const pluginVersion = configuration.__pluginVersion || "0.6.0";
+  const pluginVersion = configuration.__pluginVersion || "0.7.0";
   const pathLabel = (catalog && catalog["ui.path"]) || "Path:";
   // Nur Kennung + Anzeigename der Verbindung gehen an den Browser.
   const opts = {

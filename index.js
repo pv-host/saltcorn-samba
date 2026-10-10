@@ -61,7 +61,11 @@ const {
 const fs = require("fs");
 const {
   DEFAULT_CONNECTION,
+  CONNECTION_KEYS,
   buildConnections,
+  connectionEntriesForForm,
+  isListFormat,
+  legacyEntry,
   resolveConnection,
   permissionsFor,
 } = require("./connections");
@@ -118,7 +122,7 @@ const CONNECTION_TEST_HTML = `
   </div>
 </div>
 <script>
-// suffix: "" für die Standardverbindung, "_0", "_1", … für Zusatzverbindungen
+// suffix: "_0", "_1", … = Index des Eintrags in der Verbindungsliste
 // (Saltcorn benennt Felder in wiederholbaren Gruppen <feld>_<index>).
 window.sambaTestConn = async function(btn, suffix, connName, outId) {
   var out = document.getElementById(outId || 'sambaTestOut');
@@ -308,17 +312,17 @@ window.sambaTestConn = async function(btn, suffix, connName, outId) {
 </script>
 `;
 
-// Testblock für die Zusatzverbindungen (Schritt 3). Saltcorn rendert die
+// Testblock für die Verbindungsliste (Schritt 1). Saltcorn rendert die
 // wiederholbare Feldgruppe mit Feldnamen <feld>_<index>; das Skript sucht
 // alle vorhandenen Indizes und erzeugt je Verbindung einen Test-Button.
-// Nutzt sambaTestConn() aus CONNECTION_TEST_HTML – wird hier bei Bedarf
-// erneut definiert, weil Schritt 1 auf einer anderen Seite liegt.
-const EXTRA_CONNECTIONS_TEST_HTML =
+// Nutzt das Skript sambaTestConn() aus CONNECTION_TEST_HTML; dessen
+// Einzel-Testkarte (für das alte Einzelverbindungs-Formular) wird entfernt.
+const CONNECTIONS_TEST_HTML =
   CONNECTION_TEST_HTML
     .replace(/<div class="card mb-3"[\s\S]*?<\/div>\n<\/div>\n/, "")
     .replace("<script>", `<div class="card mb-3" style="border-left:4px solid #0d6efd">
   <div class="card-body">
-    <h5 class="card-title" style="margin-top:0">Zusatzverbindungen testen</h5>
+    <h5 class="card-title" style="margin-top:0">Verbindungen testen</h5>
     <p class="card-text" style="margin-bottom:.6rem">
       Prüft die oben eingegebenen Verbindungen einzeln (vor dem Speichern möglich).
       Es werden keine Daten geschrieben.
@@ -338,7 +342,7 @@ window.sambaScanConns = function(btn) {
   form.querySelectorAll('[name^="server_"]').forEach(function(el){
     var m = /^server_(\\d+)$/.exec(el.name); if (m && idx.indexOf(m[1]) < 0) idx.push(m[1]);
   });
-  if (!idx.length) { box.innerHTML = '<div class="alert alert-info">Noch keine Zusatzverbindung angelegt.</div>'; return; }
+  if (!idx.length) { box.innerHTML = '<div class="alert alert-info">Noch keine Verbindung angelegt.</div>'; return; }
   box.innerHTML = '';
   idx.forEach(function(i){
     var nameEl = form.querySelector('[name="name_' + i + '"]');
@@ -352,8 +356,8 @@ window.sambaScanConns = function(btn) {
   });
 };`);
 
-/** Felder einer Zusatzverbindung (Inhalt der wiederholbaren Gruppe). */
-function extraConnectionFields() {
+/** Felder einer Verbindung (Inhalt der wiederholbaren Gruppe in Schritt 1). */
+function connectionFields() {
   const modeOptions = ["if-offered", "required", "disabled"];
   return [
     new Field({
@@ -361,7 +365,9 @@ function extraConnectionFields() {
       label: "Kennung",
       sublabel:
         "Eindeutiger technischer Name, über den Views die Verbindung auswählen, z. B. <code>archiv</code> oder " +
-        "<code>nas-standort2</code>. Erlaubt: Buchstaben, Ziffern, <code>_ - .</code>; <code>default</code> ist reserviert.",
+        "<code>nas-standort2</code>. Erlaubt: Buchstaben, Ziffern, <code>_ - .</code>, max. 40 Zeichen. " +
+        "Die aus älteren Versionen übernommene Verbindung heißt <code>default</code>; sie kann umbenannt werden – " +
+        "Views mit der Auswahl <code>default</code> nutzen dann die Standardverbindung aus Schritt 2.",
       type: "String",
     }),
     new Field({
@@ -423,22 +429,44 @@ function extraConnectionFields() {
   ];
 }
 
-/** Schritt 3 der Plugin-Konfiguration: weitere Verbindungen. */
-function extraConnectionsStep() {
+/**
+ * Schritt 1 der Plugin-Konfiguration: ALLE Server-Verbindungen als eine
+ * Liste (ab v0.7.0). Die Standardverbindung ist ein normaler Eintrag.
+ *
+ * Übernahme bestehender Installationen (bis v0.6): Die bisherige
+ * Einzelverbindung (Felder server/share/…) wird beim Öffnen automatisch als
+ * erster Eintrag „default“ vorbelegt (connectionEntriesForForm). Beim
+ * Speichern setzt das Formular `connections_v2` und leert die alten
+ * Einzelfelder (versteckte Felder) – ab dann zählt nur noch die Liste.
+ * Bis dahin liest connections.js die alten Felder weiter; es muss also
+ * nichts von Hand nachgearbeitet werden.
+ */
+function connectionsStep() {
   const FieldRepeat = getFieldRepeat();
   return {
-    name: "Weitere Verbindungen",
+    name: "Server-Verbindungen",
     form: (context) => {
-      const { problems } = buildConnections(context || {});
+      const ctx = context || {};
+      const migrating = !isListFormat(ctx) && !!legacyEntry(ctx);
+      // Vorbelegung: Saltcorn füllt die Formularwerte nach form() aus dem
+      // Kontext; die Liste muss daher im Kontext stehen.
+      ctx.connections = connectionEntriesForForm(ctx);
+      const { problems } = buildConnections({ ...ctx, connections_v2: true });
+      const esc = (x) => String(x).replace(/[<>&]/g, "?");
+      const notice = migrating
+        ? '<div class="alert alert-info"><b>Übernommen:</b> Die bisherige Einzelverbindung steht jetzt als ' +
+          "Eintrag <code>default</code> in der Liste. Bitte einmal speichern – bestehende Views laufen unverändert weiter.</div>"
+        : "";
       const problemHtml = problems.length
         ? '<div class="alert alert-warning"><b>Folgende Einträge werden ignoriert:</b><ul style="margin:.3rem 0 0 1rem">' +
-          problems.map((p) => "<li>" + String(p).replace(/[<>&]/g, "?") + "</li>").join("") +
+          problems.map((p) => "<li>" + esc(p) + "</li>").join("") +
           "</ul></div>"
         : "";
       const intro =
-        '<p class="text-muted">Optional. Hier legen Sie zusätzliche Samba-Server bzw. Freigaben an. ' +
-        "Jede View wählt in ihrer Konfiguration, welche Verbindung sie nutzt (<code>default</code> = Schritt 1). " +
-        "Upload-/Lösch-Schalter, Größenlimit und Endungs-Sperrliste aus „Zugriff &amp; Berechtigungen“ gelten für alle Verbindungen.</p>";
+        '<p class="text-muted">Alle Samba-Server bzw. Freigaben, die Saltcorn nutzen darf. Jede View wählt in ihrer ' +
+        "Konfiguration eine Verbindung; die Auswahl <code>default</code> nutzt die <b>Standardverbindung</b> " +
+        "(Schritt 2, leer = erster Eintrag). Upload-/Lösch-Schalter, Größenlimit und Endungs-Sperrliste aus Schritt 2 " +
+        "gelten für alle Verbindungen.</p>";
       if (!FieldRepeat) {
         return new Form({
           fields: [
@@ -449,164 +477,74 @@ function extraConnectionsStep() {
               attributes: {
                 html:
                   '<div class="alert alert-warning">Diese Saltcorn-Version unterstützt keine wiederholbaren ' +
-                  "Feldgruppen. Bitte Saltcorn aktualisieren, um mehrere Verbindungen zu nutzen.</div>",
+                  "Feldgruppen. Bitte Saltcorn aktualisieren.</div>",
               },
             }),
           ],
         });
       }
-      return new Form({
+      // Versteckte Felder: Formatkennung setzen, alte Einzelfelder leeren
+      // (sonst blieben z. B. alte Passwörter in der Konfiguration stehen –
+      // Saltcorn führt gespeicherte und neue Werte zusammen).
+      const hidden = ["connections_v2", ...CONNECTION_KEYS].map(
+        (name) => new Field({ name, type: "String", input_type: "hidden" })
+      );
+      const form = new Form({
         fields: [
           new Field({
             name: "_conn_intro",
             label: " ",
             input_type: "custom_html",
-            attributes: { html: intro + problemHtml },
+            attributes: { html: intro + notice + problemHtml },
           }),
           new FieldRepeat({
             name: "connections",
-            label: "Zusatzverbindungen",
-            fields: extraConnectionFields(),
+            label: "Verbindungen",
+            fields: connectionFields(),
           }),
           new Field({
             name: "_conn_test_html",
             label: " ",
             input_type: "custom_html",
-            attributes: { html: EXTRA_CONNECTIONS_TEST_HTML },
+            attributes: { html: CONNECTIONS_TEST_HTML },
           }),
+          ...hidden,
         ],
       });
+      form.values = { ...(form.values || {}), connections_v2: "1" };
+      for (const k of CONNECTION_KEYS) form.values[k] = "";
+      return form;
     },
   };
+}
+
+/**
+ * Auswahl der Standardverbindung (Schritt 2). Views mit der Auswahl
+ * „default“ nutzen diese Verbindung. Leer = erster Eintrag der Liste.
+ */
+function defaultConnectionField(context) {
+  const names = buildConnections({ ...(context || {}) }).connections.map((c) => c.name);
+  return new Field({
+    name: "default_connection",
+    label: "Standardverbindung",
+    sublabel:
+      "Wird von Views mit der Auswahl <code>default</code> genutzt (auch von allen Views aus älteren Versionen). " +
+      "Leer = erster Eintrag der Liste in Schritt 1.",
+    type: "String",
+    ...(names.length ? { attributes: { options: ["", ...names] } } : {}),
+  });
 }
 
 const configuration_workflow = () =>
   new Workflow({
     steps: [
-      {
-        name: "Samba-Server (Standardverbindung „default“)",
-        form: () =>
-          new Form({
-            fields: [
-              new Field({
-                name: "server",
-                label: "Server (Hostname oder IP)",
-                sublabel:
-                  "Adresse des Samba-Servers <b>ohne</b> smb://-Präfix und ohne Backslashes. " +
-                  "Beispiele: <code>192.168.1.20</code>, <code>fileserver.local</code>, <code>nas01</code>. " +
-                  "Läuft Saltcorn in Docker, ist <code>localhost</code> → der Container selbst; nutzen Sie die LAN-IP " +
-                  "des Host-Systems (nicht 127.0.0.1) oder verbinden Sie den Container ins gleiche Bridge/Host-Netzwerk. " +
-                  "Der Hostname muss <b>aus Sicht des Saltcorn-Prozesses</b> auflösbar sein.",
-                type: "String",
-                required: true,
-              }),
-              new Field({
-                name: "share",
-                label: "Freigabe / Share-Name",
-                sublabel:
-                  "Name der SMB-Freigabe <b>ohne</b> Schrägstriche. Auf dem Server sichtbar als <code>[NAME]</code>-Abschnitt " +
-                  "in <code>/etc/samba/smb.conf</code> oder unter Windows als Freigabe-Name. " +
-                  "Beispiele: <code>daten</code>, <code>public</code>, <code>projekte</code>. " +
-                  "Nicht die Ordner-Bezeichnung, sondern der Freigabe-Name eingeben.",
-                type: "String",
-                required: true,
-              }),
-              new Field({
-                name: "domain",
-                label: "Domäne / Arbeitsgruppe",
-                sublabel:
-                  "Windows-Domäne oder Arbeitsgruppe des Benutzers. " +
-                  "Für klassische Samba-Server im Heim-/Firmennetz meist <code>WORKGROUP</code> (Standard). " +
-                  "Für Active Directory: NetBIOS-Name der Domäne, z. B. <code>CONTOSO</code>. Nicht der FQDN.",
-                type: "String",
-                default: "WORKGROUP",
-              }),
-              new Field({
-                name: "username",
-                label: "Benutzername",
-                sublabel:
-                  "Samba-/AD-Benutzer, unter dem gelesen und (je nach Rechten) geschrieben wird. " +
-                  "<b>Nicht</b> im Format <code>DOMÄNE\\user</code> – die Domäne gehört oben ins eigene Feld. " +
-                  "Leer lassen für anonymen Zugriff (nur möglich, wenn der Share <code>guest ok = yes</code> erlaubt).",
-                type: "String",
-              }),
-              new Field({
-                name: "password",
-                label: "Passwort",
-                sublabel:
-                  "Passwort des Samba-Benutzers. Wird verschlüsselt in der Saltcorn-Datenbank abgelegt. " +
-                  "<b>Wichtig:</b> Samba nutzt ein eigenes Passwort (<code>smbpasswd</code>), nicht zwingend das Linux-Login-Passwort. " +
-                  "Moderne Samba-Server lehnen leere Passwörter ab.",
-                type: "String",
-                input_type: "password",
-              }),
-              new Field({
-                name: "base_path",
-                label: "Basispfad (optional)",
-                sublabel:
-                  "Beschränkt sämtlichen Zugriff auf ein Unterverzeichnis der Freigabe. " +
-                  "Relativ, mit Schrägstrichen, <b>ohne</b> führenden Slash. " +
-                  "Beispiel: <code>projekte/2026</code> → der File-Manager sieht nur diesen Unterordner und alles darin. " +
-                  "Leer lassen für die komplette Share-Wurzel. <code>..</code> und absolute Pfade werden abgelehnt.",
-                type: "String",
-              }),
-              new Field({
-                name: "port",
-                label: "TCP-Port",
-                sublabel:
-                  "SMB-Port des Servers. Standard: <code>445</code> (SMB2/3 über TCP). " +
-                  "Nur ändern, wenn Ihr Server bewusst auf einem anderen Port läuft. " +
-                  "<b>SMBv1 (Port 139/NetBIOS) wird nicht unterstützt</b> – aktivieren Sie SMB2+ auf dem Server " +
-                  "(<code>min protocol = SMB2</code> in smb.conf).",
-                type: "Integer",
-                default: 445,
-              }),
-              new Field({
-                name: "signing_mode",
-                label: "SMB-Signing",
-                sublabel:
-                  "Wie streng jede Nachricht kryptografisch signiert wird (HMAC-SHA256 für SMB 2.x, AES-128-CMAC für SMB 3.x). " +
-                  "<b>required</b>: Signing wird zwingend verlangt; Verbindung schlägt fehl, wenn der Server nicht signiert. " +
-                  "<b>if-offered</b> (Standard): Signing wird genutzt, wenn der Server es anbietet, sonst weiter ohne. " +
-                  "<b>disabled</b>: kein Signing (nur auswählen, wenn der Server Signing verweigert). " +
-                  "Moderne Samba-Server verlangen häufig Signing → „required“ oder „if-offered“ setzen.",
-                type: "String",
-                required: true,
-                attributes: {
-                  options: ["if-offered", "required", "disabled"],
-                },
-                default: "if-offered",
-              }),
-              new Field({
-                name: "encryption_mode",
-                label: "SMB-Verschlüsselung",
-                sublabel:
-                  "Verschlüsselung der Nutzdaten auf dem Draht (AES-128/256-CCM/GCM). " +
-                  "<b>required</b>: Verbindung nur mit Verschlüsselung; scheitert, wenn der Server keine anbietet. " +
-                  "<b>if-offered</b> (Standard): Verschlüsselung wird genutzt, wenn der Server sie anbietet. " +
-                  "<b>disabled</b>: keine Verschlüsselung anfordern (nur für Legacy-Server oder LAN-Only-Setups). " +
-                  "Shares, die serverseitig <code>SMB2_SHAREFLAG_ENCRYPT_DATA</code> tragen, erzwingen Verschlüsselung ohnehin.",
-                type: "String",
-                required: true,
-                attributes: {
-                  options: ["if-offered", "required", "disabled"],
-                },
-                default: "if-offered",
-              }),
-              new Field({
-                name: "_test_html",
-                label: " ",
-                input_type: "custom_html",
-                attributes: { html: CONNECTION_TEST_HTML },
-              }),
-            ],
-          }),
-      },
+      connectionsStep(),
       {
         name: "Zugriff & Berechtigungen",
-        form: () =>
+        form: (context) =>
           new Form({
             fields: [
+              defaultConnectionField(context),
               new Field({
                 name: "min_role_read",
                 label: "Mindestrolle für Lesen",
@@ -670,15 +608,6 @@ const configuration_workflow = () =>
                 type: "String",
               }),
               new Field({
-                name: "public_smb_host",
-                label: "Für Clients sichtbarer SMB-Hostname (optional)",
-                sublabel:
-                  "Wird in erzeugten <code>smb://</code>-Links verwendet. Standard: der Wert aus dem Feld <b>Server</b>. " +
-                  "Nützlich, wenn Saltcorn in Docker läuft (Server = interne IP), Clients aber den LAN-Namen sehen sollen " +
-                  "(z. B. <code>fileserver.local</code>).",
-                type: "String",
-              }),
-              new Field({
                 name: "_view_binding_head",
                 label: " ",
                 input_type: "custom_html",
@@ -722,7 +651,6 @@ const configuration_workflow = () =>
             ],
           }),
       },
-      extraConnectionsStep(),
     ],
   });
 

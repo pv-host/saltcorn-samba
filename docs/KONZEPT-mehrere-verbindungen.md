@@ -30,8 +30,12 @@ zugreifen, waren damit nicht umsetzbar.
 
 ## Umsetzung (Variante A)
 
-- **`default`** = bisherige Felder aus Schritt 1. Weitere Verbindungen im
-  Feld `connections` (Array von Objekten), Schritt 3 *Weitere Verbindungen*.
+- (Stand 0.5–0.6) **`default`** = Felder aus Schritt 1, weitere Verbindungen
+  im Feld `connections`, Schritt 3 *Weitere Verbindungen*.
+- **Ab 0.7.0:** alle Verbindungen gleichberechtigt in `connections`
+  (Schritt 1), Standardverbindung wählbar über `default_connection`;
+  Altkonfigurationen werden automatisch übernommen (siehe README,
+  „Übernahme aus älteren Versionen“).
 - **Kennung** `^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$`, eindeutig
   (ohne Groß-/Kleinschreibung), `default` reserviert.
 - **Vererbung:** Globale Einstellungen aus Schritt 2 (allow_*, max_upload_mb,

@@ -20,6 +20,18 @@ Features:
 
 ---
 
+## Was ist neu in 0.7.0 (Konfiguration)
+
+- **Eine Liste für alle Verbindungen:** Die bisher separat konfigurierte
+  Standardverbindung ist jetzt ein normaler Eintrag der Verbindungsliste
+  (Schritt 1). Der Wizard hat nur noch zwei Schritte.
+- **Standardverbindung wählbar** (Schritt 2): Views mit der Auswahl
+  `default` nutzen sie; leer = erster Eintrag.
+- **Keine Nacharbeit an bestehenden Installationen:** Die alte
+  Einzelverbindung wird automatisch als Eintrag `default` übernommen,
+  bestehende Views laufen unverändert weiter (Details unter
+  [Übernahme aus älteren Versionen](#übernahme-aus-älteren-versionen-bis-06)).
+
 ## Was ist neu in 0.6.0 (Sicherheit)
 
 - **View-Bindung:** Jede Samba-View erhält beim Anzeigen ein signiertes
@@ -166,12 +178,18 @@ docker exec -it <saltcorn-container> \
 ## Konfiguration
 
 Nach der Installation unter *Einstellungen → Plugins → saltcorn-samba →
-Configure* ausfüllen. Die Konfiguration hat drei Schritte:
+Configure* ausfüllen. Die Konfiguration hat zwei Schritte.
 
-### Schritt 1 — *Samba-Server (Standardverbindung „default“)*
+### Schritt 1 — *Server-Verbindungen*
+
+Alle Samba-Server bzw. Freigaben stehen gleichberechtigt in **einer
+Liste**. Über **„Hinzufügen“** legen Sie beliebig viele Verbindungen an;
+jede View wählt eine davon aus. Jeder Eintrag hat diese Felder:
 
 | Feld | Beispiel | Beschreibung |
 |---|---|---|
+| **Kennung** | `default`, `archiv`, `nas-standort2` | Eindeutiger technischer Name, über den Views die Verbindung auswählen. Erlaubt: Buchstaben, Ziffern, `_ - .`, max. 40 Zeichen. |
+| **Anzeigename** | `Zentrale` | Optional; erscheint als Badge im Kopf der View. Leer = Kennung. |
 | **Server** | `192.168.1.20`, `nas01`, `fileserver.local` | Hostname oder IP des Samba-Servers, **ohne** `smb://`-Präfix und **ohne** Backslashes. Muss aus Sicht des Saltcorn-Prozesses auflösbar sein. **In Docker:** nicht `localhost` verwenden – stattdessen LAN-IP des Hosts oder Container ins passende Netzwerk hängen. |
 | **Freigabe / Share-Name** | `daten`, `public`, `projekte` | Name der SMB-Freigabe **ohne** Slashes. Auf dem Server als `[NAME]`-Abschnitt in `smb.conf` bzw. unter Windows als Freigabename sichtbar. Nicht die Ordner-Bezeichnung. |
 | **Domäne / Arbeitsgruppe** | `WORKGROUP`, `CONTOSO` | Meist `WORKGROUP` (Standard). Für Active Directory: NetBIOS-Name der Domäne, nicht der FQDN. |
@@ -181,14 +199,43 @@ Configure* ausfüllen. Die Konfiguration hat drei Schritte:
 | **TCP-Port** | `445` | Standard SMB2/3 über TCP. **SMBv1 (139) wird nicht unterstützt** – auf dem Server `min protocol = SMB2` setzen. |
 | **SMB-Signing** | `if-offered` | `if-offered` (Standard), `required` oder `disabled`. Nutzt HMAC-SHA256 (SMB 2.x) bzw. AES-128-CMAC (SMB 3.x). Moderne Samba-Server verlangen häufig Signing → `required` oder `if-offered`. |
 | **SMB-Verschlüsselung** | `if-offered` | `if-offered` (Standard), `required` oder `disabled`. Nutzt AES-128/256-CCM/GCM. Shares mit serverseitigem `SMB2_SHAREFLAG_ENCRYPT_DATA` erzwingen Verschlüsselung ohnehin. |
+| **Für Clients sichtbarer SMB-Hostname** | `fileserver.firma.de` | Optional; wird nur in erzeugten `smb://`-Links verwendet (z. B. wenn Saltcorn den Server intern per IP erreicht). |
+| **Nur lesen** | *aus* | Sperrt alle Schreibaktionen dieser Verbindung – unabhängig von Rollen. |
+| **Mindestrolle Lesen / Schreiben** | *leer* | Optional; leer = globaler Wert aus Schritt 2. |
 
-> **Tipp:** Bevor Sie speichern, klicken Sie auf **„→ Verbindung jetzt
-> testen“** – siehe Abschnitt [Verbindung testen](#verbindung-testen).
+Hinweise:
+
+- Jede Verbindung hat **eigene Zugangsdaten**; es wird nichts von einer
+  anderen Verbindung geerbt.
+- Fehlerhafte Einträge (fehlende oder doppelte Kennung, kein Server …)
+  werden ignoriert und oben in Schritt 1 aufgelistet; die übrigen
+  Verbindungen funktionieren weiter.
+- Mit **„Test-Buttons für alle Verbindungen anzeigen“** lässt sich jede
+  Verbindung vor dem Speichern prüfen – siehe
+  [Verbindung testen](#verbindung-testen).
+
+#### Übernahme aus älteren Versionen (bis 0.6)
+
+Bis 0.6 gab es eine separat konfigurierte Standardverbindung plus
+optionale Zusatzverbindungen. **Es ist keine Nacharbeit nötig:**
+
+1. Direkt nach dem Update läuft alles unverändert – das Plugin liest die
+   alte Einzelverbindung weiterhin als Verbindung `default`.
+2. Beim nächsten Öffnen der Plugin-Konfiguration steht sie bereits als
+   erster Listeneintrag `default` in Schritt 1 (Hinweis „Übernommen“),
+   gefolgt von den bisherigen Zusatzverbindungen.
+3. Einmal speichern: Die Konfiguration wird ins Listenformat überführt,
+   die alten Einzelfelder (inkl. Passwort) werden geleert.
+
+Views mit der Auswahl `default` funktionieren in allen Fällen weiter.
+Benennen Sie den Eintrag `default` später um (z. B. in `zentrale`),
+nutzen solche Views die **Standardverbindung** aus Schritt 2.
 
 ### Schritt 2 — *Zugriff & Berechtigungen*
 
 | Feld | Default | Beschreibung |
 |---|---|---|
+| **Standardverbindung** | *leer* | Verbindung für Views mit der Auswahl `default` (auch alle Views aus älteren Versionen). Leer = erster Eintrag der Liste. |
 | Minimum role to read files | `80` | 1=Admin, 40=Staff, 80=User, 100=public |
 | Minimum role to write files | `40` | `100` deaktiviert Schreibaktionen komplett |
 | Allow upload | *aus* | schaltet Upload-Button + `POST /sambaupload` frei |
@@ -205,30 +252,12 @@ Configure* ausfüllen. Die Konfiguration hat drei Schritte:
   (read-only wenn nur gelesen werden soll).
 - Zusätzlich mit *Basispfad* den Zugriff auf ein Unterverzeichnis begrenzen.
 
-### Schritt 3 — *Weitere Verbindungen* (optional)
-
-Über **„Hinzufügen“** legen Sie beliebig viele zusätzliche Verbindungen an.
-Jede Zeile enthält dieselben Felder wie Schritt 1 plus:
-
-| Feld | Beschreibung |
-|---|---|
-| **Kennung** | Eindeutiger technischer Name, z. B. `archiv`, `nas-standort2`. Erlaubt: Buchstaben, Ziffern, `_ - .`, max. 40 Zeichen. `default` ist reserviert. |
-| **Anzeigename** | Optional; erscheint als Badge im Kopf der View. |
-| **Nur lesen** | Sperrt alle Schreibaktionen dieser Verbindung – unabhängig von Rollen. |
-| **Mindestrolle Lesen / Schreiben** | Optional; leer = globaler Wert aus Schritt 2. |
-
-Die Schalter Upload/Löschen/Umbenennen/Ordner anlegen, das Größenlimit und
-die Endungs-Sperrliste aus Schritt 2 gelten für alle Verbindungen.
-**Zugangsdaten werden nicht von `default` geerbt** – jede Verbindung braucht
-eigene. Fehlerhafte Einträge (doppelte Kennung, fehlender Server …) werden
-ignoriert und oben im Schritt 3 aufgelistet; die übrigen Verbindungen
-funktionieren weiter. Mit **„Test-Buttons für alle Verbindungen anzeigen“**
-lässt sich jede Verbindung vor dem Speichern prüfen.
 
 ### Verbindung testen
 
-Direkt im Konfigurations-Wizard (Schritt 1) gibt es den Button
-**„→ Verbindung jetzt testen“**. Er sendet die aktuell im Formular
+Direkt im Konfigurations-Wizard (Schritt 1) erzeugt
+**„Test-Buttons für alle Verbindungen anzeigen“** je Listeneintrag einen
+Button **„Verbindung „…“ testen“**. Dieser sendet die aktuell im Formular
 stehenden Werte an die interne Route `POST /sambatest` (nur für Admins),
 baut eine SMB-Verbindung auf und listet den Basispfad bzw. die
 Share-Wurzel auf. Es werden dabei **keine** Daten gespeichert oder
@@ -297,7 +326,7 @@ Row-Modus = `from_field`, Feld = `akte_dir` einbetten.
 Beide Views (`SambaFileManager`, `SambaTree`) haben zwei zusätzliche
 Konfigurationsfelder:
 
-- **Samba-Verbindung** – Auswahl aus `default` und den Kennungen aus Schritt 3.
+- **Samba-Verbindung** – Auswahl aus `default` (= Standardverbindung aus Schritt 2) und den Kennungen aus Schritt 1.
 - **Verbindung aus Feld** (optional) – Textfeld der Tabelle, dessen Wert die
   Kennung liefert. Beispiel: Tabelle *Standorte* mit Spalte `fileserver`
   (`hq`, `werk2`, …) – die Show-View eines Standorts zeigt automatisch dessen

@@ -4,6 +4,40 @@ All notable changes to `saltcorn-samba` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] – 2026-10-10
+
+### Changed – alle Verbindungen in einer Liste
+
+- Die Standardverbindung wird nicht mehr separat konfiguriert, sondern ist
+  ein gleichberechtigter Eintrag der Verbindungsliste `connections`.
+  Der Konfigurations-Wizard hat nur noch zwei Schritte:
+  *Server-Verbindungen* und *Zugriff & Berechtigungen*.
+- Neu: `default_connection` (Schritt 2) legt fest, welche Verbindung Views
+  mit der Auswahl `default` nutzen; leer = erster Listeneintrag. Eine
+  ausdrücklich gewählte Standardverbindung hat Vorrang vor einem Eintrag
+  namens `default`.
+- Die Kennung `default` ist nicht mehr reserviert.
+- `public_smb_host` gibt es jetzt pro Verbindung (vorher nur global für
+  die Standardverbindung).
+- Fehlende Kennungen werden als Problem gemeldet statt übergangen.
+
+### Migration – automatisch, ohne Nacharbeit
+
+- Konfigurationen bis 0.6 (Einzelverbindung in `server`/`share`/…)
+  funktionieren nach dem Update unverändert: Die Einzelverbindung wird zur
+  Laufzeit als Eintrag `default` geführt.
+- Beim nächsten Öffnen der Konfiguration ist sie als erster Listeneintrag
+  vorbelegt. Beim Speichern wird `connections_v2` gesetzt und die alten
+  Einzelfelder (inkl. Passwort) werden geleert; ab dann zählt nur die Liste.
+- Bestehende Views mit `connection = default` bzw. ohne Auswahl laufen
+  weiter – auch wenn der Eintrag später umbenannt wird.
+
+### Tests
+
+- 15 neue Unit-Tests (Listenformat, Standardverbindung, simulierte
+  Migration inkl. Saltcorn-Merge-Verhalten); E2E gegen Samba:
+  migrierte, umbenannte und umgestellte Standardverbindung.
+
 ## [0.6.0] – 2026-10-10
 
 ### Security – View-Bindung (signierte View-Tokens)

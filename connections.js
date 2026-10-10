@@ -1,29 +1,29 @@
 /**
- * saltcorn-samba – Verbindungsregister (ab v0.5.0).
+ * saltcorn-samba – Verbindungsregister.
  *
- * Eine Saltcorn-Instanz kann mehrere SMB-Verbindungen (Server + Freigabe +
- * Zugangsdaten) gleichzeitig nutzen. Jede Verbindung hat eine eindeutige
- * Kennung (`name`), über die Views und HTTP-Routen sie referenzieren.
+ * Ab v0.7.0 sind ALLE Server-Verbindungen gleichberechtigte Einträge der
+ * Liste `connections` (Saltcorn-FieldRepeat). Jede Verbindung hat eine
+ * eindeutige Kennung (`name`), über die Views sie referenzieren. Welche
+ * Verbindung Views mit der Auswahl „default“ (Standardverbindung) nutzen,
+ * legt `default_connection` fest – leer = erster Eintrag der Liste.
  *
- *   - Die bisherigen Felder der Plugin-Konfiguration (server, share, …)
- *     bilden die Verbindung mit der Kennung "default". Bestehende
- *     Installationen laufen dadurch ohne Migration weiter.
- *   - Weitere Verbindungen liegen im Konfigurationsfeld `connections`
- *     (Saltcorn-FieldRepeat → Array von Objekten).
+ * Rückwärtskompatibilität (keine Nacharbeit an bestehenden Installationen):
+ *   - Konfigurationen bis v0.6 hatten eine Einzelverbindung in den
+ *     Feldern server/share/… plus optional Zusatzverbindungen. Solange
+ *     `connections_v2` nicht gesetzt ist, wird die Einzelverbindung zur
+ *     Laufzeit als erster Listeneintrag „default“ geführt (legacyEntry()).
+ *   - Beim nächsten Öffnen der Plugin-Konfiguration ist sie bereits als
+ *     Listeneintrag vorbelegt; mit dem Speichern wird `connections_v2`
+ *     gesetzt und die alten Einzelfelder werden geleert.
+ *   - Views mit der Auswahl „default“ funktionieren in beiden Fällen weiter.
  *
  * Globale Einstellungen (allow_upload, max_upload_mb, denied_extensions,
- * min_role_read, min_role_write, …) gelten für alle Verbindungen. Pro
- * Verbindung können überschrieben werden:
- *   - min_role_read / min_role_write (nur leer = globaler Wert)
- *   - read_only (sperrt sämtliche Schreibaktionen für diese Verbindung)
+ * min_role_read, min_role_write, View-Bindung …) gelten für alle
+ * Verbindungen. Pro Verbindung überschreibbar: min_role_read,
+ * min_role_write (leer = global) und read_only.
  *
- * Sicherheitsmodell: Die Kennung kommt bei jedem Request vom Browser
- * (?conn=…). Sie ist daher KEINE Sicherheitsgrenze für sich – geschützt
- * wird über die pro Verbindung prüfbaren Rollen und die Rechte des
- * jeweiligen SMB-Service-Accounts. Zugangsdaten verlassen den Server nie.
- *
- * Dieses Modul hat keine Saltcorn-Abhängigkeiten und ist vollständig
- * unit-getestet (test/connections.test.js).
+ * Zugangsdaten verlassen den Server nie. Dieses Modul hat keine
+ * Saltcorn-Abhängigkeiten und ist unit-getestet (test/connections.test.js).
  */
 
 "use strict";
@@ -110,11 +110,11 @@ function pickConnectionFields(src) {
 }
 
 /**
- * Liefert die zusätzlichen Verbindungen aus der Plugin-Konfiguration als
- * Array. Saltcorn speichert FieldRepeat-Werte als Array von Objekten;
- * manuell gepflegte Konfigurationen können auch ein JSON-String sein.
+ * Rohe Listeneinträge aus `connections`. Saltcorn speichert FieldRepeat-
+ * Werte als Array von Objekten; manuell gepflegte Konfigurationen können
+ * auch ein JSON-String sein.
  */
-function rawExtraConnections(pluginCfg) {
+function rawListEntries(pluginCfg) {
   let list = pluginCfg && pluginCfg.connections;
   if (typeof list === "string") {
     try {
@@ -126,6 +126,38 @@ function rawExtraConnections(pluginCfg) {
   return Array.isArray(list) ? list.filter((c) => c && typeof c === "object") : [];
 }
 
+/** Ist die Konfiguration bereits im Listenformat (ab v0.7.0) gespeichert? */
+function isListFormat(pluginCfg) {
+  return isEnabled(pluginCfg && pluginCfg.connections_v2);
+}
+
+/**
+ * Die Einzelverbindung einer Konfiguration bis v0.6 als Listeneintrag
+ * (Kennung „default“) – oder null, wenn keine vorhanden bzw. die
+ * Konfiguration schon im Listenformat ist.
+ */
+function legacyEntry(pluginCfg) {
+  const cfg = pluginCfg || {};
+  if (isListFormat(cfg) || !cfg.server || !cfg.share) return null;
+  return {
+    ...pickConnectionFields(cfg),
+    name: DEFAULT_CONNECTION,
+    label: String(cfg.default_label || "").trim() || "Standard",
+  };
+}
+
+/**
+ * Listeneinträge, wie sie das Konfigurationsformular anzeigen soll: im
+ * Altformat die Einzelverbindung als ERSTER Eintrag „default“, gefolgt von
+ * den bisherigen Zusatzverbindungen. So erscheint beim ersten Öffnen nach
+ * dem Update sofort die vollständige Liste.
+ */
+function connectionEntriesForForm(pluginCfg) {
+  const legacy = legacyEntry(pluginCfg);
+  const list = rawListEntries(pluginCfg);
+  return legacy ? [legacy, ...list] : list;
+}
+
 /**
  * Baut die vollständige Liste aller Verbindungen. Jede Verbindung ist ein
  * flaches Objekt, das sich direkt an withClient()/canRead()/canWrite()
@@ -133,45 +165,32 @@ function rawExtraConnections(pluginCfg) {
  *
  * Ungültige Einträge (fehlende/ungültige/doppelte Kennung, kein Server
  * oder Share) werden nicht verwendet, sondern in `problems` gemeldet –
- * damit ein Tippfehler in einer Zusatzverbindung nie die Standard-
- * verbindung lahmlegt.
+ * damit ein Tippfehler in einem Eintrag nie die übrigen lahmlegt.
  *
- * @returns {{ connections: object[], problems: string[] }}
+ * @returns {{ connections: object[], problems: string[], defaultName: string|null }}
  */
 function buildConnections(pluginCfg) {
   const cfg = pluginCfg || {};
   const globals = { ...cfg };
-  delete globals.connections;
-  for (const k of CONNECTION_KEYS) delete globals[k];
+  for (const k of [...CONNECTION_KEYS, "connections", "connections_v2", "default_connection", "default_label"]) {
+    delete globals[k];
+  }
 
   const connections = [];
   const problems = [];
   const seen = new Set();
 
-  // 1. Standardverbindung aus den klassischen Feldern (rückwärtskompatibel).
-  if (cfg.server && cfg.share) {
-    connections.push({
-      ...globals,
-      ...pickConnectionFields(cfg),
-      name: DEFAULT_CONNECTION,
-      label: String(cfg.default_label || "").trim() || "Standard",
-      read_only: false,
-    });
-    seen.add(DEFAULT_CONNECTION.toLowerCase());
-  }
-
-  // 2. Zusätzliche Verbindungen.
-  rawExtraConnections(cfg).forEach((entry, index) => {
-    const pos = "Zusatzverbindung #" + (index + 1);
+  connectionEntriesForForm(cfg).forEach((entry, index) => {
+    const pos = "Verbindung #" + (index + 1);
+    if (!entry.name || !String(entry.name).trim()) {
+      problems.push(pos + ": Kennung fehlt.");
+      return;
+    }
     let name;
     try {
       name = normaliseConnectionName(entry.name);
     } catch (e) {
       problems.push(pos + ": " + e.message);
-      return;
-    }
-    if (!entry.name || name === DEFAULT_CONNECTION) {
-      problems.push(pos + ": Kennung fehlt oder ist reserviert („default“).");
       return;
     }
     if (seen.has(name.toLowerCase())) {
@@ -199,7 +218,15 @@ function buildConnections(pluginCfg) {
     connections.push(conn);
   });
 
-  return { connections, problems };
+  // Standardverbindung: ausdrücklich gewählt, sonst erster gültiger Eintrag.
+  let defaultName = connections.length ? connections[0].name : null;
+  const wanted = String(cfg.default_connection || "").trim().toLowerCase();
+  if (wanted) {
+    const hit = connections.find((c) => c.name.toLowerCase() === wanted);
+    if (hit) defaultName = hit.name;
+    else problems.push("Standardverbindung „" + cfg.default_connection + "“ existiert nicht – es gilt „" + defaultName + "“.");
+  }
+  return { connections, problems, defaultName };
 }
 
 /** Alle gültigen Verbindungen (Kurzform von buildConnections). */
@@ -209,16 +236,25 @@ function listConnections(pluginCfg) {
 
 /**
  * Löst eine Kennung zur effektiven Verbindungskonfiguration auf.
+ *   - exakte Kennung → diese Verbindung (Groß-/Kleinschreibung egal),
+ *   - „default“ bzw. leer → die Standardverbindung (siehe buildConnections),
+ *     auch wenn kein Eintrag „default“ heißt.
+ * Eine ausdrücklich gewählte Standardverbindung hat Vorrang vor einem
+ * Eintrag namens „default“.
  * Wirft mit `status` 400 (ungültige Kennung), 404 (unbekannt) oder 500
  * (Plugin gar nicht konfiguriert).
  */
 function resolveConnection(pluginCfg, requestedName) {
   const name = normaliseConnectionName(requestedName);
-  const { connections } = buildConnections(pluginCfg);
+  const { connections, defaultName } = buildConnections(pluginCfg);
   if (!connections.length) {
     throw connectionError(500, "Samba-Plugin ist nicht konfiguriert (keine Verbindung angelegt).", "NOT_CONFIGURED");
   }
-  const lc = name.toLowerCase();
+  const explicitDefault = String((pluginCfg && pluginCfg.default_connection) || "").trim();
+  const lc =
+    name === DEFAULT_CONNECTION && (explicitDefault || !connections.some((c) => c.name.toLowerCase() === DEFAULT_CONNECTION))
+      ? String(defaultName).toLowerCase()
+      : name.toLowerCase();
   const found = connections.find((c) => c.name.toLowerCase() === lc);
   if (!found) {
     throw connectionError(404, "Unbekannte Samba-Verbindung „" + name + "“.", "UNKNOWN_CONNECTION");
@@ -227,13 +263,12 @@ function resolveConnection(pluginCfg, requestedName) {
 }
 
 /**
- * Optionen für das Dropdown in der View-Konfiguration. Die Standard-
- * verbindung steht immer an erster Stelle – auch wenn sie (noch) nicht
- * konfiguriert ist, damit bestehende Views ihren Wert behalten.
+ * Optionen für das Dropdown in der View-Konfiguration: „default“ (=
+ * Standardverbindung, auch für bestehende Views) und alle Kennungen.
  */
 function connectionOptions(pluginCfg) {
   const names = listConnections(pluginCfg).map((c) => c.name);
-  if (!names.includes(DEFAULT_CONNECTION)) names.unshift(DEFAULT_CONNECTION);
+  if (!names.some((n) => n.toLowerCase() === DEFAULT_CONNECTION)) names.unshift(DEFAULT_CONNECTION);
   return names;
 }
 
@@ -290,6 +325,9 @@ module.exports = {
   DEFAULT_CONNECTION,
   CONNECTION_KEYS,
   isEnabled,
+  isListFormat,
+  legacyEntry,
+  connectionEntriesForForm,
   normaliseConnectionName,
   buildConnections,
   listConnections,
